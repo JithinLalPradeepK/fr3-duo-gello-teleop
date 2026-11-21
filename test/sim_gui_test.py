@@ -105,7 +105,7 @@ def scenario(gui, win, cam, model, arms, logdir, sim_cfg, R, app):
         return False
 
     def page(w):
-        return gui.call(lambda: {w.HOME: 'HOME', w.LIVE: 'LIVE', w.OPERATOR: 'OPERATOR'}.get(
+        return gui.call(lambda: {w.LIVE: 'LIVE', w.OPERATOR: 'OPERATOR'}.get(
             w.stack.currentIndex(), '?'))
 
     def shot(name):
@@ -147,8 +147,11 @@ def scenario(gui, win, cam, model, arms, logdir, sim_cfg, R, app):
         time.sleep(0.1)
     R.check(sc, 'GUI connected to the supervisor, sees OFFLINE',
             gui.call(lambda: model.connected) and wait_state('OFFLINE', 5), str(state()))
-    R.check(sc, 'control display HOME, camera display LIVE', page(win) == 'HOME' and page(cam) == 'LIVE',
+    R.check(sc, 'both displays show the camera page (no Home page)', page(win) == 'LIVE' and page(cam) == 'LIVE',
             f'{page(win)} / {page(cam)}')
+    R.check(sc, 'control display: ROBO STATUS closed; camera display: ROBO STATUS open on the left',
+            gui.call(lambda: (win.live.status_open, cam.live.status_open)) == (False, True),
+            str(gui.call(lambda: (win.live.status_open, cam.live.status_open))))
     R.check(sc, 'START/HOME disabled, STOP enabled, BRING UP enabled',
             enabled('b_start', 'b_home', 'b_stop', 'b_bringup') ==
             {'b_start': False, 'b_home': False, 'b_stop': True, 'b_bringup': True},
@@ -164,7 +167,7 @@ def scenario(gui, win, cam, model, arms, logdir, sim_cfg, R, app):
             enabled('b_start', 'b_home', 'b_stop', 'b_bringup') ==
             {'b_start': True, 'b_home': True, 'b_stop': True, 'b_bringup': False},
             str(enabled('b_start', 'b_home', 'b_stop', 'b_bringup')))
-    R.check(sc, 'control display back on HOME', page(win) == 'HOME', page(win))
+    R.check(sc, 'Back from the Operator page returns to the camera page', page(win) == 'LIVE', page(win))
     shot('G2_idle')
 
     sc = 'G3 START button -> live page -> TELEOP'
@@ -180,12 +183,12 @@ def scenario(gui, win, cam, model, arms, logdir, sim_cfg, R, app):
             enabled('b_start', 'b_home', 'b_stop') == {'b_start': False, 'b_home': False, 'b_stop': True})
     shot('G3_teleop')
 
-    sc = 'G4 STOP button -> IDLE -> HOME page'
+    sc = 'G4 STOP button -> IDLE -> stays on the camera page'
     print(f'\n== {sc}', flush=True)
     R.check(sc, 'STOP clicked (Operator > Testing stage)', click('b_stop', 0))
     R.check(sc, 'IDLE', wait_state('IDLE', 20), str(state()))
     gui.call(win.go_auto)
-    R.check(sc, 'control display HOME after STOP', page(win) == 'HOME', page(win))
+    R.check(sc, 'control display on the camera page after STOP (it used to fall back to Home)', page(win) == 'LIVE', page(win))
     shot('G4_stopped')
 
     sc = 'G5 HOME button -> HOMING -> IDLE'
@@ -194,7 +197,7 @@ def scenario(gui, win, cam, model, arms, logdir, sim_cfg, R, app):
     R.check(sc, 'HOME clicked', click('b_home', 0))
     R.check(sc, 'HOMING', wait_state('HOMING', 10), str(state()))
     gui.call(win.go_auto)
-    R.check(sc, 'control display not on LIVE while HOMING', page(win) != 'LIVE', page(win))
+    R.check(sc, 'control display on the camera page while HOMING', page(win) == 'LIVE', page(win))
     shot('G5_homing')
     R.check(sc, 'IDLE again', wait_state('IDLE', 40), str(state()))
     R.check(sc, 'message both arms at home', 'both arms at home' in gui.call(lambda: model.message))
@@ -210,7 +213,9 @@ def scenario(gui, win, cam, model, arms, logdir, sim_cfg, R, app):
         os.kill(pid, signal.SIGABRT)
     R.check(sc, 'ERROR', wait_state('ERROR', 30), str(state()))
     time.sleep(1.5)
-    R.check(sc, 'control display left LIVE on ERROR', page(win) != 'LIVE', page(win))
+    R.check(sc, 'control display stays on the camera page on ERROR', page(win) == 'LIVE', page(win))
+    st = gui.call(lambda: cam.live.state.text())
+    R.check(sc, 'the camera display (status open) shows the ERROR', 'ERROR' in st, st)
     txt = issues()
     R.check(sc, 'problem text names the right arm and ERROR RECOVERY', 'right' in txt and 'ERROR RECOVERY' in txt,
             txt)

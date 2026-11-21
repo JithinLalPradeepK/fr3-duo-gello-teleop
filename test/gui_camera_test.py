@@ -3,6 +3,8 @@
   C-1 the three depth topics are configured and subscribed
   C-2 the 180 degree flip: D405 RGB + depth flipped, ZED untouched, --invert changes it
   C-3 the window stays exactly screen-sized (1080 px high) on every page, both roles, and no camera tile leaves it
+  C-4 NO HOME PAGE: both displays start on the camera page (main: status closed, second screen: status open on the left),
+      the header has only Camera View / Operator Mode, state changes never move the main display to anything else
 Run: source env/host_env.sh; python3 test/gui_camera_test.py
 """
 import os
@@ -136,7 +138,7 @@ for role in ('main', 'camera'):
     while time.time() - t < 4:
         settle(5)
         time.sleep(0.05)
-    for name, idx in (('live', w.LIVE), ('operator', w.OPERATOR), ('home', w.HOME), ('live', w.LIVE)):
+    for name, idx in (('live', w.LIVE), ('operator', w.OPERATOR), ('live', w.LIVE)):
         if role == 'camera' and idx != w.LIVE:
             continue
         w.show_page(idx)
@@ -146,6 +148,72 @@ for role in ('main', 'camera'):
         check(f'{role} / {name} page: window 1920x1080 and tiles inside it', w.width() == 1920 and w.height() == 1080
               and low <= 1080, f'window {w.width()}x{w.height()}, lowest tile bottom {low}')
     w.close()
+print('== C-4 no Home page')
+check('the Home page is gone (no HomePage class, no HOME index)', not hasattr(G, 'HomePage') and not hasattr(G.MainWindow, 'HOME'))
+main_w = G.MainWindow(model, ros, hub, dec, True, 'main')
+cam_w = G.MainWindow(model, ros, hub, dec, True, 'camera')
+cam_w.main_window = main_w                                      # as main() does: the camera display opens the Operator on the main one
+for w in (main_w, cam_w):
+    w.resize(1920, 1080)
+    w.show()
+settle(40)
+check('the page stack has exactly two pages: camera view and operator', main_w.stack.count() == 2, str(main_w.stack.count()))
+check('header tabs are exactly Camera View / Operator Mode (no Home tab)',
+      [b.text() for b in main_w.live.tabs] == ['Camera View', 'Operator Mode'], str([b.text() for b in main_w.live.tabs]))
+check('main display starts on the camera page', main_w.stack.currentIndex() == main_w.LIVE)
+check('main display: ROBO STATUS closed, cameras fill the width', not main_w.live.status_open and not main_w.live.panel.isVisible(),
+      f'open={main_w.live.status_open} visible={main_w.live.panel.isVisible()}')
+check('second screen starts on the camera page', cam_w.stack.currentIndex() == cam_w.LIVE)
+check('second screen: ROBO STATUS open at once', cam_w.live.status_open and cam_w.live.panel.isVisible()
+      and cam_w.live.panel.width() == cam_w.live.SIDE_W, f'open={cam_w.live.status_open} width={cam_w.live.panel.width()}')
+tile = cam_w.live.tiles['zed']
+left = tile.mapTo(cam_w, tile.rect().topLeft()).x()
+check('second screen: the status list is LEFT of the cameras and nothing leaves the window',
+      cam_w.live.panel.mapTo(cam_w, cam_w.live.panel.rect().topLeft()).x() < left
+      and max(t_.mapTo(cam_w, t_.rect().bottomRight()).y() for t_ in cam_w.findChildren(G.CameraTile) if t_.isVisible()) <= 1080
+      and max(t_.mapTo(cam_w, t_.rect().bottomRight()).x() for t_ in cam_w.findChildren(G.CameraTile) if t_.isVisible()) <= 1920,
+      f'status x={cam_w.live.panel.mapTo(cam_w, cam_w.live.panel.rect().topLeft()).x()} first tile x={left}')
+check('both windows are exactly screen sized', (main_w.width(), main_w.height(), cam_w.width(), cam_w.height()) == (1920, 1080, 1920, 1080),
+      f'{main_w.width()}x{main_w.height()} / {cam_w.width()}x{cam_w.height()}')
+
+feeder.command('bringup')
+t = time.time()
+while time.time() - t < 5:
+    settle(5)
+    time.sleep(0.05)
+check('after BRING UP (IDLE) the main display is still on the camera page', main_w.stack.currentIndex() == main_w.LIVE)
+feeder.pedal('start')
+t = time.time()
+while time.time() - t < 4:
+    settle(5)
+    time.sleep(0.05)
+check('in TELEOP the main display is on the camera page', main_w.stack.currentIndex() == main_w.LIVE and ros is not None
+      and model.state in ('TELEOP', 'TELEOP_STARTING'), f'{main_w.stack.currentIndex()} {model.state}')
+feeder.pedal('stop')
+t = time.time()
+while time.time() - t < 4:
+    settle(5)
+    time.sleep(0.05)
+check('after STOP the main display STAYS on the camera page (it used to fall back to Home)',
+      main_w.stack.currentIndex() == main_w.LIVE and model.state == 'IDLE', f'{main_w.stack.currentIndex()} {model.state}')
+cam_w.open_operator()                                           # OPERATOR tab on the second screen
+settle(20)
+check('Operator tab on the second screen opens the Operator page on the MAIN display; second screen stays on cameras',
+      main_w.stack.currentIndex() == main_w.OPERATOR and cam_w.stack.currentIndex() == cam_w.LIVE)
+main_w.operator.back.emit()
+settle(20)
+check('"Back" on the Operator page returns to the camera page', main_w.stack.currentIndex() == main_w.LIVE)
+main_w.open_operator()
+settle(20)
+feeder.pedal('start')                                           # teleop starts while the Operator page is open
+t = time.time()
+while time.time() - t < 3:
+    settle(5)
+    time.sleep(0.05)
+check('when teleop starts the main display leaves the Operator page for the cameras', main_w.stack.currentIndex() == main_w.LIVE,
+      f'{main_w.stack.currentIndex()} {model.state}')
+main_w.close()
+cam_w.close()
 ros.shutdown()
 rclpy.try_shutdown()
 print(f'===== {"PASS" if not fails else "FAIL: " + str(fails)}')

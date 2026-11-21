@@ -396,3 +396,13 @@ same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_to
   command that opens hardware (cameras, grippers, pedal, GELLO) check `pgrep -af "start_demo|demo_supervisor|realsense2|zed"` first.
 - NOT YET RUN after these GUI/camera changes: test/sim_gui_test.sh (refuses while a demo runs) - run it once the demo is closed.
 
+## HOME PAGE REMOVED FROM THE GUI (2026-11-21, user request)
+- demo_gui.py: HomePage class, HEADLINE/SUBLINE/HOME_LINE, the "Home" tab (LivePage.go_home) and the automatic Home <-> camera
+  switching are gone. MainWindow.LIVE, OPERATOR = 0, 1. Main display ('main' role) starts on the camera page with the ROBO STATUS
+  closed; second screen ('camera' role) starts on the camera page with the status OPEN (LivePage.set_status_open(on, animate=False)).
+  Operator "Back" -> camera page; teleop start while the Operator page is open -> camera page.
+- Side effect to know: the problem bar was only on the Home/Operator pages, so on the main display (status closed) an ERROR is
+  not visible until STATUS is opened (the second screen shows it). Offered to the user: auto-open the status on ERROR.
+- Tests adapted: test/gui_camera_test.py (C-3 pages, new C-4 "no Home page", 36 checks, PASS), test/sim_gui_test.py (G1-G6 expectations).
+  GUI end-to-end simulation (test/sim_gui_test.sh) NOT YET RUN for this change: a real demo (arms + grippers) was running.
+

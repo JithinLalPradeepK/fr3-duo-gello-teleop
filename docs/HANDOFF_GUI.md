@@ -68,3 +68,11 @@ Paths are now relative to the repo (no more hard-coded `~/robot_demo`).
 
 ## Safety notes
 No GUI code sends motion by itself; page switching only reads state. The GUI is not a safety device; keep the E-stop.
+
+## Update 2026-11-21: the Home page was removed
+Both displays now start on the **camera page**: the main display (display 1) with the ROBO STATUS list closed (cameras fill
+the screen), the second screen (display 2) with the ROBO STATUS list **open on the left** of the cameras. The header tabs are
+`Camera View | Operator Mode` (no Home tab); the Operator page's "Back" button returns to the camera page; when teleop starts
+while the Operator page is open, the main display goes back to the cameras. Nothing else changed: the Operator page, theme and
+full-screen buttons, depth views and the pedals work as before. Note: problems are now only shown in the ROBO STATUS list (open on
+the second screen; on the main display open it with STATUS) - the old problem bar existed on the Home page only.

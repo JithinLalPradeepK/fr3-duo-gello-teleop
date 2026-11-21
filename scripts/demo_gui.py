@@ -7,13 +7,15 @@
       (own ROS domain 199, localhost only). Preview keys: F5 = pedal START, F6 = STOP, F7 = HOME,
       F9 = demo ERROR, F10 = drop a camera, F11 = depth available / not
 
-TWO DISPLAYS: display 1 (--control-screen, default 0) = Home / Operator, switches to the camera page on START;
-display 2 (--camera-screen, default 1) = camera page ALWAYS. One monitor / --single: one window (Home -> cameras).
+TWO DISPLAYS (2026-11-21: the Home page was REMOVED, the cameras are the base page of both displays):
+display 1 (--control-screen, default 0) = camera page, ROBO STATUS closed (cameras fill the screen), plus the Operator page;
+display 2 (--camera-screen, default 1) = camera page with the ROBO STATUS list OPEN on the left. One monitor / --single:
+one window = display 1. The STATUS button opens / closes the list on either display.
 Redesign (branch features/GUI-development, see docs/GUI_CHANGES.md):
-  HOME      white page, robot image + one line, NO buttons. Foot pedals drive everything.
-  LIVE      camera page (opens by itself on START), layout from the design mockup assets/brand/Home@1x(2).png, no
-            navbar: header bar (logo, title, HOME / OPERATOR MODE / theme / full screen), ROBO STATUS list (slides out with the
-            STATUS button, closed by default, cameras then fill the screen), 2 x 2 grid: ZED RGB | ZED DEPTH / left wrist | right wrist (wrists carry the DEPTH inset).
+  LIVE      camera page (the page both displays start on), layout from the design mockup assets/brand/Home@1x(2).png, no
+            navbar: header bar (logo, title, CAMERA VIEW / OPERATOR MODE tabs, STATUS / theme / full screen), ROBO STATUS list
+            (slides in / out with the STATUS button), 2 x 2 grid: ZED RGB | ZED DEPTH / left wrist | right wrist (wrists carry the
+            DEPTH inset).
   OPERATOR  navbar button (no drop-down; also on the camera display, it opens on the main display): ALL sections at once in a grid (Testing stage, Fix errors, Robot setup,
             Status, System, Log) = all of Jithin's old buttons.
   NAVBAR    logo (black/white with the mode), LEFT / RIGHT arm chips, CAMERAS chip (click = the 3 cameras),
@@ -69,10 +71,6 @@ CAMERAS = [('ZED Mini · Overview', 'zed', '/zed/zed_node/rgb/color/rect/image/c
 INVERT = {'d405_1', 'd405_2'}
 CAM_TITLE = {key: title for title, key, _, _ in CAMERAS}
 TELEOP_STATES = ('TELEOP_STARTING', 'TELEOP')
-HEADLINE = 'Move your hands.\nTwo robots follow.'
-SUBLINE = 'FRANKA RESEARCH 3 DUO  ·  GELLO TELEOPERATION'
-HOME_LINE = {'STARTING_UP': 'Getting ready ...', 'IDLE': 'Ready.', 'HOMING': 'The robots are returning home ...',
-             'STOPPING': 'Stopping ...', 'RECOVERING': 'Recovering ...', 'SHUTTING_DOWN': 'Shutting down ...'}
 HINTS = {'STARTING_UP': 'Starting arms, grippers, GELLO and cameras ...',
          'IDLE': 'Press START, then lift both GELLOs out of their holders.',
          'TELEOP_STARTING': 'Hold the GELLOs still - the robots move to the GELLO pose.',
@@ -833,33 +831,6 @@ class Decoder(QObject):
 
 
 # ---------------------------------------------------------------------------------------------- pages
-class HomePage(QWidget):
-    """Welcome page: picture, one line, no buttons."""
-
-    def __init__(self):
-        super().__init__()
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(96, 24, 64, 24)
-        lay.setSpacing(40)
-        left = QVBoxLayout()
-        left.setSpacing(18)
-        left.addStretch(1)
-        self.head = label(HEADLINE, 'headline')
-        self.sub = label(SUBLINE, 'subline')
-        self.line = label('', 'subline')
-        for w in (self.head, self.sub, self.line):
-            left.addWidget(w)
-        left.addStretch(1)
-        lay.addLayout(left, 5)
-        self.img = ImageView(framed=False)
-        self.img.setMinimumSize(300, 300)
-        self.img.set_pixmap(QPixmap(T.ROBOTS))
-        lay.addWidget(self.img, 6)
-
-    def update_state(self, state):
-        self.line.setText(HOME_LINE.get(state, ''))
-
-
 class PipView(ImageView):
     """Main camera picture with the depth inset (spec 5.9: 32 % of the tile, 16:9, no frame, 14 px from the
     bottom-right corner)."""
@@ -1056,7 +1027,6 @@ class LivePage(QWidget):
     SIDE_W = 350                          # narrower sidebar -> bigger cameras while the status is open
     GAP = 8                               # small gap between the camera pictures
     MARGIN = 10                           # small side margin
-    go_home = pyqtSignal()
     go_operator = pyqtSignal()
 
     GROUPS = [('Robots', [('arm_left', 'FR3 Left Arm', 'p'), ('fci_left', 'FCI', 's'), ('mode_left', 'Mode', 'm'),
@@ -1095,13 +1065,13 @@ class LivePage(QWidget):
         titles.addWidget(self.subtitle)
         hl.addLayout(titles)
         hl.addStretch(1)
-        self.track = QFrame()                              # nav tabs: Home | Camera View | Operator Mode
+        self.track = QFrame()                              # nav tabs: Camera View | Operator Mode
         self.track.setObjectName('track')
         tl = QHBoxLayout(self.track)
         tl.setContentsMargins(4, 4, 4, 4)
         tl.setSpacing(6)
         self.tabs = []
-        for text, slot in (('Home', self.go_home.emit), ('Camera View', None), ('Operator Mode', self.go_operator.emit)):
+        for text, slot in (('Camera View', None), ('Operator Mode', self.go_operator.emit)):
             b = QPushButton(text)
             b.setFixedHeight(40)
             b.setProperty('active', slot is None)
@@ -1175,11 +1145,20 @@ class LivePage(QWidget):
         re-fits its tiles to whatever size it gets."""
         return QSize(900, 420)
 
-    def set_status_open(self, on):
-        """Slide the ROBO STATUS sidebar in / out; the cameras grow to fill the freed width."""
+    def set_status_open(self, on, animate=True):
+        """Slide the ROBO STATUS sidebar in / out; the cameras grow to fill the freed width.
+        animate=False: jump to the final state (used for the camera display, which starts with the status open)."""
         if on == self.status_open:
             return
         self.status_open = on
+        if not animate:
+            self.side_w = self.SIDE_W if on else 0
+            self.panel.setFixedWidth(max(self.side_w, 1))
+            self.panel.setVisible(on)
+            self.fit_tiles()
+            if on:
+                QTimer.singleShot(0, self.fit_rows)
+            return
         if on:
             self.panel.show()
             QTimer.singleShot(0, self.fit_rows)
@@ -1551,12 +1530,12 @@ class OperatorPage(QWidget):
 
 # ---------------------------------------------------------------------------------------------- window
 class MainWindow(ConfirmClose, QWidget):
-    HOME, LIVE, OPERATOR = 0, 1, 2
+    LIVE, OPERATOR = 0, 1                 # the Home page was removed (2026-11-21): cameras are always the base page
 
     def __init__(self, model, ros, hub, decoder, preview=False, role='main'):
         super().__init__()
         self.m, self.hub, self.decoder = model, hub, decoder
-        self.role = role                      # 'main': Home / Operator, goes to Live on START; 'camera': always Live
+        self.role = role                      # 'main': camera page (status closed) + Operator; 'camera': camera page, status open
         self.was_teleop = False
         self.setWindowTitle('Robot demo' + (' - CAMERAS' if role == 'camera' else '') + (' (PREVIEW)' if preview else ''))
         outer = QVBoxLayout(self)
@@ -1599,7 +1578,7 @@ class MainWindow(ConfirmClose, QWidget):
         self.nav, self.controls_host = nav, nl
         outer.addWidget(nav)
 
-        # problem bar (Home / Operator; the Live page shows problems on its left side)
+        # problem bar (Operator page; the camera page shows problems in its status window)
         self.errbar = QFrame()
         self.errbar.setObjectName('errbar')
         el = QHBoxLayout(self.errbar)
@@ -1614,12 +1593,11 @@ class MainWindow(ConfirmClose, QWidget):
 
         # pages
         self.stack = QStackedWidget()
-        self.home, self.live = HomePage(), LivePage(hub)
+        self.live = LivePage(hub)
         self.operator = OperatorPage(model, ros)
         self.operator.back.connect(self.go_auto)
-        self.live.go_home.connect(self.go_home)
         self.live.go_operator.connect(self.open_operator)
-        for pg in (self.home, self.live, self.operator):
+        for pg in (self.live, self.operator):                 # index 0 = LIVE, 1 = OPERATOR
             self.stack.addWidget(pg)
         outer.addWidget(self.stack, 1)
 
@@ -1628,9 +1606,11 @@ class MainWindow(ConfirmClose, QWidget):
         hub.theme_changed.connect(self.apply_theme)
         self.apply_theme(hub.theme)
         self.b_full.setText('FULL SCREEN')
-        self.set_status(False)                # camera page: status window closed by default
-        if role == 'camera':
-            self.show_page(self.LIVE)
+        # both displays start on the camera page: the main one with the status window closed, the camera display (second
+        # screen) with the ROBO STATUS list open on the left of the cameras
+        self.live.set_status_open(role == 'camera', animate=False)
+        self.set_status(role == 'camera', animate=False)
+        self.show_page(self.LIVE)
 
     # -- navigation
     def show_page(self, idx):
@@ -1652,14 +1632,6 @@ class MainWindow(ConfirmClose, QWidget):
     def show_operator(self):
         self.show_page(self.OPERATOR)
 
-    def go_home(self):
-        """HOME button (camera page): the main display goes back to the home page."""
-        w = self.main_window
-        w.show_page(self.HOME)
-        if w is not self:
-            w.raise_()
-            w.activateWindow()
-
     def open_operator(self):
         """OPERATOR button. On the camera display the panel opens on the MAIN display (the camera display stays on
         the cameras)."""
@@ -1669,8 +1641,8 @@ class MainWindow(ConfirmClose, QWidget):
             w.raise_()
             w.activateWindow()
 
-    def set_status(self, on):
-        self.live.set_status_open(on)
+    def set_status(self, on, animate=True):
+        self.live.set_status_open(on, animate)
         self.b_status.setText('STATUS  ◂' if on else 'STATUS  ▸')
 
     def toggle_full(self):
@@ -1686,7 +1658,8 @@ class MainWindow(ConfirmClose, QWidget):
             self.b_full.setText('EXIT FULL SCREEN' if self.isFullScreen() else 'FULL SCREEN')
 
     def go_auto(self):
-        self.show_page(self.LIVE if self.m.state in TELEOP_STATES else self.HOME)
+        """Back from the Operator page: always the camera page."""
+        self.show_page(self.LIVE)
 
     # -- look
     def apply_theme(self, mode):
@@ -1700,7 +1673,6 @@ class MainWindow(ConfirmClose, QWidget):
         self.errbar.setStyleSheet(f"QFrame#errbar {{background:{c['panel']}; border-bottom:1px solid {c['line']};}}")
         for chip in (self.chip_left, self.chip_right, self.chip_cams):
             chip.restyle()
-        self.home.img.update()
         self.live.restyle()
         self.update_all()
 
@@ -1719,19 +1691,17 @@ class MainWindow(ConfirmClose, QWidget):
         rows = [(m.cam_level(k), f'{t}   {m.cam_fps(k):.0f} fps' if m.cam_fps(k) else f'{t}   not connected')
                 for k, t in CAM_TITLE.items()]
         self.chip_cams.set_state('ok' if all(r[0] == 'ok' for r in rows) else 'bad', rows)
-        # automatic page change from the supervisor state (pedals and buttons behave the same)
+        # page change from the supervisor state (pedals and buttons behave the same): the camera display always shows
+        # the cameras; when teleop starts the main display leaves the Operator page for the cameras. (No Home page.)
         teleop = state in TELEOP_STATES
-        if self.role == 'camera':             # second display: always the camera page
+        if self.role == 'camera':
             if self.stack.currentIndex() != self.LIVE:
                 self.show_page(self.LIVE)
                 return
         if self.role == 'main' and teleop != self.was_teleop:
             self.was_teleop = teleop
-            if teleop:
+            if teleop and self.stack.currentIndex() != self.LIVE:
                 self.show_page(self.LIVE)
-                return
-            if self.stack.currentIndex() == self.LIVE:
-                self.show_page(self.HOME)
                 return
         # problem bar
         iss = m.issues()
@@ -1746,9 +1716,7 @@ class MainWindow(ConfirmClose, QWidget):
             self.errbar.show()
         else:
             self.errbar.hide()
-        if idx == self.HOME:
-            self.home.update_state(state)
-        elif idx == self.LIVE:
+        if idx == self.LIVE:
             self.live.update_model(m)
         else:
             self.operator.refresh()
@@ -1990,11 +1958,11 @@ def run_screenshots(app, outdir, windows, hub, feeder):
         steps.append(t)
         QTimer.singleShot(int(t * 1000), fn)
 
-    at(1.0, lambda: shot('1_home_offline_light'))
+    at(1.0, lambda: shot('1_cameras_offline_light'))
     at(1.2, lambda: feeder.command('bringup'))
-    at(5.0, lambda: shot('2_home_ready_light'))
+    at(5.0, lambda: shot('2_cameras_ready_light'))
     at(5.2, lambda: hub.set_theme('dark'))
-    at(5.8, lambda: shot('3_home_ready_dark'))
+    at(5.8, lambda: shot('3_cameras_ready_dark'))
     at(6.0, lambda: hub.set_theme('light'))
     at(6.2, lambda: feeder.pedal('start'))
     at(10.0, lambda: shot('4_live_status_OFF_light'))
@@ -2005,7 +1973,7 @@ def run_screenshots(app, outdir, windows, hub, feeder):
     at(13.4, lambda: win.set_status(True))
     at(14.6, lambda: shot('7_live_camdrop_status_ON_dark'))
     at(14.8, lambda: (win.set_status(False), feeder.toggle_cam(), hub.set_theme('light'), feeder.error()))
-    at(17.2, lambda: shot('9_home_error_light'))
+    at(17.2, lambda: shot('9_cameras_error_light'))
     at(17.4, lambda: win.open_operator())
     at(18.2, lambda: shot('10_operator_light'))
     at(18.4, lambda: hub.set_theme('dark'))

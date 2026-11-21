@@ -24,3 +24,11 @@ Not touched: supervisor, pedal node, desk agent, start_demo.sh (`demo_gui.py --o
 
 Preview keys (`--preview`, sends nothing): F5 pedal START, F6 STOP, F7 HOME, F9 error, F10 drop a camera, F11 depth available / not.
 Open questions: which D405 is left/right wrist (ASSUMED d405_1 = left, d405_2 = right, see `CAMERAS`), final headline text, depth topic.
+
+## Update 2026-11-21: the Home page was removed
+Both displays now start on the **camera page**: the main display (display 1) with the ROBO STATUS list closed (cameras fill
+the screen), the second screen (display 2) with the ROBO STATUS list **open on the left** of the cameras. The header tabs are
+`Camera View | Operator Mode` (no Home tab); the Operator page's "Back" button returns to the camera page; when teleop starts
+while the Operator page is open, the main display goes back to the cameras. Nothing else changed: the Operator page, theme and
+full-screen buttons, depth views and the pedals work as before. Note: problems are now only shown in the ROBO STATUS list (open on
+the second screen; on the main display open it with STATUS) - the old problem bar existed on the Home page only.
