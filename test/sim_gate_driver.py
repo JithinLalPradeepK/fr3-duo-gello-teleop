@@ -847,8 +847,9 @@ def run_single(a, logdir):
             ' -> '.join(dict.fromkeys(arm.state_names())))
     R.check(sc, 'no HOLD "GELLO off snapshot" wait', not any('GELLO off snapshot' in t for _, t in arm.states))
     time.sleep(3.0)
+    t_live = arm.state_time('LIVE')                  # (state_time takes arm.lock itself: never call it inside the lock)
     with arm.lock:
-        live = [(t, q) for t, q in arm.relayed if arm.state_time('LIVE') and t >= arm.state_time('LIVE')]
+        live = [(t, q) for t, q in arm.relayed if t_live and t >= t_live]
         texts = [t for _, t in arm.states]
     R.check(sc, 'state said "catching up with the GELLO" and then plain LIVE',
             any('catching up' in t for t in texts) and texts[-1] == 'LIVE', str(texts[-3:]))

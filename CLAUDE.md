@@ -350,4 +350,9 @@ same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_to
   5 s; HoldLogic pulse=True, demo_pedal --pulse-keys KEY_F12). KEY_C=reset is also mapped as a normal 3 s hold: reprogram
   pedal 3 in ElfKey (~/Downloads/SetupElfKey-3.2.1-linux-amd64.tar, ~/elfkey) to letter C in hold mode and the double tap is
   no longer needed. pedal_logic_test now 23 checks (P8 pulse).
+- SIM RESULTS 2026-11-21 16:57 (after the pedal/guard/planner/catch-up changes): gate 170/170 + 15/15, supervisor 124/124
+  (T6f-T6j pedal 2 / pedal 3 macros, T9 HOME in two phases), GUI e2e 33/33, geometry + pedal logic (23) pass.
+  Pedal 3 was reprogrammed in ElfKey to letter C, continuous mode (KEY_C=reset = normal 3 s hold; F12 tap-to-confirm stays
+  as a fallback). Lesson: sim_gate_driver Arm.state_time() takes arm.lock - never call it inside "with arm.lock:" (deadlock
+  froze the fake GELLO publisher once). HARDWARE TEST OF THE NEW BEHAVIOUR STILL OPEN.
 
