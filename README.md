@@ -133,8 +133,8 @@ See [docs/GUI_DEVELOPMENT.md](docs/GUI_DEVELOPMENT.md). Short version:
 ## Brand assets
 
 The GUI uses the Franka Robotics logo. The logo is a trademark and is **not** in this repository.
-Put `FrankaRobotics_CompanyLogo_Digital_RGB.svg` and `FrankaRobotics_CompanyLogo_negative_Digital_RGB.svg`
-into `assets/brand/`. Without them the logo area stays empty. The Montserrat fonts are included
+Put the PNGs listed in [docs/HANDOFF_GUI.md](docs/HANDOFF_GUI.md) (`logo_black.png`, `logo_white.png`, `fr3_duo.png`, the two
+`FrankaRobotics_Trademark_*` icons) into `assets/brand/`. Without them the logo and picture areas stay empty. The Montserrat fonts are included
 under the SIL Open Font License (`assets/brand/fonts/OFL.txt`).
 
 ## Status
