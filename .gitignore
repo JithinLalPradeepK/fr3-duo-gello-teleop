@@ -1,0 +1,21 @@
+# run logs (large, machine-specific)
+logs/
+
+# Python
+__pycache__/
+*.pyc
+
+# old manual script copies (git history replaces them)
+scripts/.backup/
+
+# Franka Robotics trademarks / brand guide: NOT redistributable in a public repo.
+# Put the logo SVGs into assets/brand/ locally (see README "Brand assets").
+docs/brand/
+assets/brand/*.svg
+assets/brand/*.png
+assets/brand/*.jpg
+
+# editors
+.vscode/
+.idea/
+*.swp

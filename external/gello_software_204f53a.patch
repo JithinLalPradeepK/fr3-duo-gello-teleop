@@ -1,0 +1,66 @@
+diff --git a/ros2/src/franka_fr3_arm_controllers/config/example_fr3_duo_config.yaml b/ros2/src/franka_fr3_arm_controllers/config/example_fr3_duo_config.yaml
+index 6d58a7d..c0cf845 100644
+--- a/ros2/src/franka_fr3_arm_controllers/config/example_fr3_duo_config.yaml
++++ b/ros2/src/franka_fr3_arm_controllers/config/example_fr3_duo_config.yaml
+@@ -4,9 +4,9 @@ LEFT:
+   fake_sensor_commands: "false" 
+   joint_sources: ["joint_states", "franka_gripper/joint_states"] 
+   joint_state_rate: 30 
+-  load_gripper: "true" 
++  load_gripper: "false" 
+   namespace: "left"
+-  robot_ip: "192.168.20.11" 
++  robot_ip: "192.168.1.51" 
+   urdf_file: "fr3/fr3.urdf.xacro" 
+   use_fake_hardware: "false" 
+   use_rviz: "false" 
+@@ -17,9 +17,9 @@ RIGHT:
+   fake_sensor_commands: "false"
+   joint_sources: ["joint_states", "franka_gripper/joint_states"]
+   joint_state_rate: 30
+-  load_gripper: "true"
++  load_gripper: "false"
+   namespace: "right"
+-  robot_ip: "192.168.20.12"
++  robot_ip: "192.168.1.50"
+   urdf_file: "fr3/fr3.urdf.xacro"
+   use_fake_hardware: "false"
+   use_rviz: "false"
+\ No newline at end of file
+diff --git a/ros2/src/franka_gello_state_publisher/config/franka_gello_duo.yaml b/ros2/src/franka_gello_state_publisher/config/franka_gello_duo.yaml
+index 669c3c3..18417d7 100644
+--- a/ros2/src/franka_gello_state_publisher/config/franka_gello_duo.yaml
++++ b/ros2/src/franka_gello_state_publisher/config/franka_gello_duo.yaml
+@@ -10,7 +10,7 @@
+ 
+ LEFT:
+   namespace: "left"
+-  com_port: "usb-ROBOTIS_OpenRB-150_xxxxxxxx" # REPLACE WITH YOUR ID
++  com_port: "usb-ROBOTIS_OpenRB-150_55DFEA165157375037202020FF122B11-if00" # REPLACE WITH YOUR ID
+   num_arm_joints: 7
+   joint_signs: [1, -1, 1, -1, 1, 1, 1]
+   gripper: true
+@@ -31,7 +31,7 @@ LEFT:
+ 
+ RIGHT:
+   namespace: "right"
+-  com_port: "usb-ROBOTIS_OpenRB-150_xxxxxxxx" # REPLACE WITH YOUR ID
++  com_port: "usb-ROBOTIS_OpenRB-150_051C587A5157375037202020FF120E11-if00" # REPLACE WITH YOUR ID
+   num_arm_joints: 7
+   joint_signs: [1, -1, 1, -1, 1, 1, 1]
+   gripper: true
+diff --git a/ros2/src/franka_gripper_manager/config/example_fr3_duo_config_robotiq.yaml b/ros2/src/franka_gripper_manager/config/example_fr3_duo_config_robotiq.yaml
+index 7c4af39..8b6d39f 100644
+--- a/ros2/src/franka_gripper_manager/config/example_fr3_duo_config_robotiq.yaml
++++ b/ros2/src/franka_gripper_manager/config/example_fr3_duo_config_robotiq.yaml
+@@ -1,7 +1,7 @@
+ LEFT:
+-  com_port: "/dev/serial/by-id/usb-FTDI_USB_TO_RS-485_DA8BS24U-if00-port0"
++  com_port: "/dev/serial/by-id/usb-FTDI_USB_TO_RS-485_DABI6GMM-if00-port0"
+   namespace: "left/gripper"
+ 
+ RIGHT:
+-  com_port: "/dev/serial/by-id/usb-FTDI_USB_TO_RS-485_DA8BU5F3-if00-port0"
++  com_port: "/dev/serial/by-id/usb-FTDI_USB_TO_RS-485_DABI69PP-if00-port0"
+   namespace: "right/gripper"
+\ No newline at end of file

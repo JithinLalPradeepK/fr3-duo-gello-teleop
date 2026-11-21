@@ -1,0 +1,4 @@
+# FR3 home poses: <robot_ip> q1..q7 [rad]. Last values saved on the laptop (2026-11-18).
+# Re-record any time with: fr3_duo_home --save
+192.168.1.50 -1.8343 -0.6202 1.5144 -2.2085 1.1681 1.2407 -1.3288
+192.168.1.51 1.9313 -0.6306 -1.7178 -2.1633 -1.1038 1.2573 1.5174

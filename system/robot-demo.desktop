@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Robot Demo
+Comment=FR3 Duo GELLO demo: supervisor + foot pedal + GUI (closing the GUI shuts the demo down)
+Exec=/home/workstation-1/robot_demo/scripts/start_demo.sh
+Icon=applications-science
+Terminal=false
+Categories=Science;Engineering;
+StartupNotify=false

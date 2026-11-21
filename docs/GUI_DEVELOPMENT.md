@@ -1,0 +1,45 @@
+# GUI development guide
+
+The GUI (`scripts/demo_gui.py` + `scripts/franka_theme.py`) is a **thin client**. It contains no demo
+logic: it only calls supervisor services and shows the JSON status. Keep it that way. Any behaviour
+change (what START does, when HOME is allowed, ...) belongs in `demo_supervisor.py`, so the foot pedal
+and the GUI keep behaving the same.
+
+## Run it without robots
+
+Needs ROS 2 Humble (`rclpy`, `std_srvs`, `sensor_msgs`) and PyQt5 (`sudo apt install python3-pyqt5
+python3-pyqt5.qtsvg`).
+
+```bash
+source /opt/ros/humble/setup.bash
+python3 scripts/demo_gui.py --preview            # two windows (CONTROL + CAMERAS)
+python3 scripts/demo_gui.py --preview --single   # one window with tabs (laptop)
+```
+
+`--preview` uses ROS domain 199, fills the GUI with demo data and **sends nothing**. Press **F9** to
+show a demo ERROR state.
+
+## Interface to the supervisor (do not change without agreeing with the supervisor side)
+
+| Kind | Name | Type | Meaning |
+|---|---|---|---|
+| service | `/demo/start`, `/demo/stop`, `/demo/home`, `/demo/recover`, `/demo/bringup`, `/demo/shutdown` | `std_srvs/Trigger` | Demo commands; `message` = reason if refused |
+| service | `/demo/gripper/<left\|right>/<open\|close>` | `std_srvs/Trigger` | Gripper buttons |
+| service | `/demo/desk/<prepare\|park\|unlock\|lock\|execution\|programming\|fci_on\|fci_off>` | `std_srvs/Trigger` | Franka Desk (desk_agent.py) |
+| topic | `/demo/status` | `std_msgs/String` (JSON, latched) | Full demo state (see `status_dict()` in `demo_supervisor.py`) |
+| topic | `/demo/desk/status` | `std_msgs/String` (JSON, latched) | Desk state per arm |
+| topic | `/demo/pedal/status` | `std_msgs/String` (JSON, 1 Hz) | Pedal heartbeat |
+| topic | `/zed/zed_node/rgb/color/rect/image/compressed`, `/camera/d405_1/color/image_raw/compressed`, `/camera/d405_2/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | Camera streams (JPEG, decode with `QImage.fromData`) |
+
+## Rules
+
+- Keep the safety colours: START green, STOP / ERROR red, motion amber. STOP must always be enabled.
+- The GUI must never send motion commands by itself (no timers or auto-retries of START or HOME).
+- Don't name Node attributes `handle` or `clients` (these names are taken by rclpy).
+- Watch the CPU: the GUI already uses ~47 % of a core for drawing 3 streams at 30 fps.
+- Test on the real demo machine before the demo (two monitors: CONTROL on DP-0, CAMERAS on DP-2).
+
+## Workflow
+
+Work on a branch (e.g. `gui/<topic>`) and open a pull request into `main`. Demo/supervisor fixes go
+on separate branches. Changes to the files above should get a review from the supervisor side.

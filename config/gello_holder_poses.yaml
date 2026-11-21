@@ -1,0 +1,5 @@
+# GELLO holder poses (rad, joints 1-7) written by scripts/record_gello_holder.py
+# gello_gate.py never moves the robot while the GELLO is within holder_tol of these.
+left: [1.6579, -0.7373, -1.9905, -2.987, -1.4243, 1.5152, 2.1251]
+recorded: {left: '2026-11-20T11:38:06', right: '2026-11-20T11:57:35'}
+right: [-1.7223, -0.7818, 1.7518, -2.9609, 1.1749, 1.4168, -2.0384]

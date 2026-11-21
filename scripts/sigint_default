@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""exec a command with SIGINT reset to default.
+Background jobs of non-interactive bash start with SIGINT *ignored*; ros2 launch keeps that and then
+ignores our SIGINT (seen in the sim test). Usage: sigint_default ros2 launch ..."""
+import os
+import signal
+import sys
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+os.execvp(sys.argv[1], sys.argv[1:])
