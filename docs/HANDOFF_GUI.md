@@ -16,7 +16,10 @@ Full before/after table: [GUI_CHANGES.md](GUI_CHANGES.md).
 - **Live page**: opens when the supervisor state becomes `TELEOP_STARTING` / `TELEOP`, back to Home on STOP / error.
   3 labelled cameras (ZED Mini overview, wrist camera 1 / 2 = D405 #1 / #2), RGB | DEPTH switch top right,
   problems in plain words on the left. Missing picture = Franka trademark + "NO SIGNAL".
-- **Two monitors**: both show the same window (mirrored). Cameras are decoded once and shared. `--single` = one window.
+- **Two monitors**: display 1 (`--control-screen`, default 0) shows Home / Operator and switches to the Live page on START (back to Home on STOP);
+  display 2 (`--camera-screen`, default 1) shows the Live page ALWAYS (no Operator menu there). Cameras are decoded once and shared.
+  One monitor or `--single` = one window (Home, then Live on START). Theme switch applies to both.
+- **No camera**: the tile shows the Franka trademark pulsing inside a spinning ring + "WAITING FOR CAMERA ..." (loading animation, runs only while waiting).
 - **Operator menu**: Testing stage (START / STOP / HOME, grippers), Fix errors (recovery, shut down, bring up),
   Status & logs (arm cards, system lights, log), Robot setup (Desk switches, PREPARE ALL, PARK), System (bring up / shut down).
   These are all your old CONTROL window controls, same service calls and same enable rules.
@@ -32,7 +35,7 @@ python3 scripts/demo_gui.py --preview --single      # fake data, sends nothing (
 ```
 Preview keys: F5 / F6 / F7 = pedal START / STOP / HOME, F9 = demo ERROR, F10 = drop wrist camera 2.
 Start in the preview with Operator > System > BRING UP, then F5.
-Screenshots of every page (needs no display): `QT_QPA_PLATFORM=offscreen python3 scripts/demo_gui.py --preview --single --screenshot DIR`.
+Preview with two windows on one screen: add `--force-two`. Screenshots of every page (needs no display): `QT_QPA_PLATFORM=offscreen python3 scripts/demo_gui.py --preview --single --screenshot DIR`.
 
 ## Assets (NOT in git - `.gitignore` excludes `assets/brand/*.png`, trademarks)
 Copy into `assets/brand/` locally:

@@ -7,6 +7,8 @@
       (own ROS domain 199, localhost only). Preview keys: F5 = pedal START, F6 = STOP, F7 = HOME,
       F9 = demo ERROR, F10 = drop a camera
 
+TWO DISPLAYS: display 1 (--control-screen, default 0) = Home / Operator, switches to the camera page on START;
+display 2 (--camera-screen, default 1) = camera page ALWAYS. One monitor / --single: one window (Home -> cameras).
 Redesign (branch features/GUI-development, see docs/GUI_CHANGES.md):
   HOME      white page, robot image + one line, NO buttons. Foot pedals drive everything.
   LIVE      opens by itself when teleop starts: 3 labelled camera views, RGB / DEPTH switch (top right),
@@ -14,11 +16,13 @@ Redesign (branch features/GUI-development, see docs/GUI_CHANGES.md):
   OPERATOR  navbar menu: Testing stage, Fix errors, Status & logs, Robot setup, System (all of Jithin's old buttons).
   NAVBAR    logo (black/white with the mode), LEFT / RIGHT arm chips, CAMERAS chip (click = the 3 cameras),
             Operator menu, light / dark switch (light is the default).
+  NO CAMERA  pulsing Franka trademark in a spinning ring (loading animation) in that camera's tile.
 The GUI contains no demo logic: every button is a /demo/* service call; demo_supervisor / desk_agent decide.
 THE GUI IS NOT A SAFETY DEVICE - the physical E-stop stays in use.
 """
 import argparse
 import json
+import math
 import os
 import sys
 import threading
@@ -83,6 +87,7 @@ PLAIN = {'cartesian_reflex': 'the robot stopped itself after an unexpected force
          'cartesian_position_limits_violation': 'a position limit was reached',
          'tau_j_range_violation': 'joint torque too high',
          'REFLEX': 'robot stopped itself (reflex)', 'USER_STOPPED': 'emergency stop pressed'}
+NO_SIGNAL = 'WAITING FOR CAMERA ...'
 SEVERITY = {'error': 0, 'warn': 1, 'info': 2}
 
 
@@ -466,15 +471,28 @@ class ImageView(QWidget):
     def __init__(self, rounded=True, framed=True, icon=False):
         super().__init__()
         self.pm, self.text, self.rounded, self.framed, self.icon = None, '', rounded, framed, icon
+        self.loading, self.phase = False, 0.0
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setMinimumSize(120, 90)
+        self.anim = QTimer(self)                 # loading animation, runs only while waiting for a camera
+        self.anim.timeout.connect(self._animate)
+
+    def _animate(self):
+        self.phase = (self.phase + 6.0) % 360.0
+        if self.isVisible():
+            self.update()
 
     def set_pixmap(self, pm):
-        self.pm, self.text = pm, ''
+        self.pm, self.text, self.loading = pm, '', False
+        self.anim.stop()
         self.update()
 
-    def set_text(self, text):
-        self.pm, self.text = None, text
+    def set_text(self, text, loading=False):
+        self.pm, self.text, self.loading = None, text, loading
+        if loading and not self.anim.isActive():
+            self.anim.start(33)
+        elif not loading:
+            self.anim.stop()
         self.update()
 
     def paintEvent(self, _e):
@@ -500,11 +518,24 @@ class ImageView(QWidget):
             if self.icon:                       # Franka trademark where the camera picture is missing
                 ic = T.icon_pixmap(T.MODE)
                 side = max(48, min(160, int(min(self.width(), self.height()) * 0.38)))
+                box = QRectF((r.width() - side) / 2, r.height() / 2 - side * 0.75, side, side)
                 p.setOpacity(0.9)
-                p.drawPixmap(QRectF((r.width() - side) / 2, r.height() / 2 - side * 0.75, side, side), ic,
-                             QRectF(ic.rect()))
+                if self.loading:                # pulsing trademark inside a spinning ring
+                    p.setOpacity(0.55 + 0.4 * (0.5 + 0.5 * math.sin(math.radians(self.phase * 1.5))))
+                p.drawPixmap(box, ic, QRectF(ic.rect()))
                 p.setOpacity(1.0)
-                area = self.rect().adjusted(0, int(r.height() / 2 + side * 0.4), 0, 0)
+                if self.loading:
+                    ring = box.adjusted(-side * 0.18, -side * 0.18, side * 0.18, side * 0.18)
+                    base = QColor(c['muted'])
+                    base.setAlphaF(0.25)
+                    p.setBrush(Qt.NoBrush)
+                    p.setPen(QPen(base, max(3, side / 28)))
+                    p.drawEllipse(ring)
+                    pen = QPen(QColor(T.GREY), max(3, side / 28))
+                    pen.setCapStyle(Qt.RoundCap)
+                    p.setPen(pen)
+                    p.drawArc(ring, int(-self.phase * 16), 100 * 16)
+                area = self.rect().adjusted(0, int(r.height() / 2 + side * 0.5), 0, 0)
                 p.drawText(area, Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap, self.text)
             else:
                 p.drawText(area, Qt.AlignCenter | Qt.TextWordWrap, self.text)
@@ -683,7 +714,7 @@ class Decoder(QObject):
             if data is None or now - t > 1.0:
                 if self.shown.get(key) != ('none',):
                     self.shown[key] = ('none',)
-                    self.frame.emit(key, 'NO SIGNAL')
+                    self.frame.emit(key, NO_SIGNAL)
                 continue
             sh = self.shown.get(key)
             if sh and sh[0] == 'img' and sh[1] is data:
@@ -745,14 +776,14 @@ class CameraTile(QWidget):
         h.addWidget(self.fps)
         v.addLayout(h)
         self.view = ImageView(icon=True)
-        self.view.set_text('NO SIGNAL')
+        self.view.set_text(NO_SIGNAL, loading=True)
         v.addWidget(self.view, 1)
 
     def set_frame(self, obj):
         if isinstance(obj, QPixmap):
             self.view.set_pixmap(obj)
         else:
-            self.view.set_text(obj)
+            self.view.set_text(obj, loading=(obj == NO_SIGNAL))
 
 
 class LivePage(QWidget):
@@ -1111,11 +1142,12 @@ class OperatorPage(QWidget):
 class MainWindow(ConfirmClose, QWidget):
     HOME, LIVE, OPERATOR = 0, 1, 2
 
-    def __init__(self, model, ros, hub, decoder, preview=False):
+    def __init__(self, model, ros, hub, decoder, preview=False, role='main'):
         super().__init__()
         self.m, self.hub, self.decoder = model, hub, decoder
+        self.role = role                      # 'main': Home / Operator, goes to Live on START; 'camera': always Live
         self.was_teleop = False
-        self.setWindowTitle('Robot demo' + (' (PREVIEW)' if preview else ''))
+        self.setWindowTitle('Robot demo' + (' - CAMERAS' if role == 'camera' else '') + (' (PREVIEW)' if preview else ''))
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -1178,7 +1210,11 @@ class MainWindow(ConfirmClose, QWidget):
         decoder.frame.connect(lambda k, o: self.live.tiles[k].set_frame(o))
         model.updated.connect(self.update_all)
         hub.theme_changed.connect(self.apply_theme)
+        if role == 'camera':
+            self.b_operator.hide()            # the camera display has no operator menu
         self.apply_theme(hub.theme)
+        if role == 'camera':
+            self.show_page(self.LIVE)
 
     # -- navigation
     def show_page(self, idx):
@@ -1226,6 +1262,13 @@ class MainWindow(ConfirmClose, QWidget):
         self.chip_cams.set_state('ok' if all(r[0] == 'ok' for r in rows) else 'bad', rows)
         # automatic page change from the supervisor state (pedals and buttons behave the same)
         teleop = state in TELEOP_STATES
+        if self.role == 'camera':             # second display: always the camera page
+            if self.stack.currentIndex() != self.LIVE:
+                self.show_page(self.LIVE)
+                return
+            self.errbar.hide()
+            self.live.update_model(m)
+            return
         if teleop != self.was_teleop:
             self.was_teleop = teleop
             if teleop:
@@ -1397,6 +1440,7 @@ def main():
                     help='started by start_demo.sh: closing a window asks, then shuts the demo down')
     ap.add_argument('--preview', action='store_true',
                     help='design preview with demo data; never sends anything (own ROS domain 199)')
+    ap.add_argument('--force-two', action='store_true', help=argparse.SUPPRESS)      # test: two windows, one screen
     ap.add_argument('--screenshot', metavar='DIR', help=argparse.SUPPRESS)       # offscreen design check
     a = ap.parse_args(rclpy.utilities.remove_ros_args(sys.argv)[1:])
     if a.preview:
@@ -1417,8 +1461,11 @@ def main():
     hub, model = Hub(), Model(ros)
     decoder = Decoder(ros, hub)
     screens = app.screens()
-    two = not a.single and len(screens) >= 2
-    windows = [MainWindow(model, ros, hub, decoder, a.preview) for _ in range(2 if two else 1)]
+    two = (not a.single and len(screens) >= 2) or a.force_two
+    # display 1 (--control-screen): Home / Operator, switches to the cameras on START; display 2: cameras, always
+    windows = [MainWindow(model, ros, hub, decoder, a.preview, 'main')]
+    if two:
+        windows.append(MainWindow(model, ros, hub, decoder, a.preview, 'camera'))
     if feeder:
         feeder.attach(ros)
         for w in windows:
@@ -1431,7 +1478,7 @@ def main():
     if two:
         place(windows[1], screens[min(a.camera_screen, len(screens) - 1)])
     if a.screenshot:
-        run_screenshots(app, a.screenshot, windows[0], hub, feeder)
+        run_screenshots(app, a.screenshot, windows, hub, feeder)
     import signal
     signal.signal(signal.SIGINT, lambda *_: app.quit())
     tick = QTimer()                      # lets Python handle Ctrl-C while Qt runs
@@ -1443,14 +1490,18 @@ def main():
     sys.exit(rc)
 
 
-def run_screenshots(app, outdir, win, hub, feeder):
+def run_screenshots(app, outdir, windows, hub, feeder):
     """Developer aid: walk through the pages in --preview and save PNGs (works with QT_QPA_PLATFORM=offscreen)."""
     os.makedirs(outdir, exist_ok=True)
-    win.resize(1920, 1080)
+    win = windows[0]
+    for w in windows:
+        w.resize(1920, 1080)
     steps = []
 
     def shot(name):
         win.grab().save(os.path.join(outdir, name + '.png'))
+        if len(windows) > 1:
+            windows[1].grab().save(os.path.join(outdir, name + '_cam.png'))
 
     def at(t, fn):
         steps.append(t)
