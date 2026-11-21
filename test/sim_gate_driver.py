@@ -831,6 +831,47 @@ def run_single(a, logdir):
     rc = wait_exit(p, 15)
     R.check(sc, 'gate exit code 0, controller inactive', rc == 0 and arm.ctrl_state() == 'inactive', f'rc={rc}')
 
+    # ---- S25: GELLO moved while the robot was ramping (0.3 rad) -> LIVE at once with a slow catch-up (no HOLD wait)
+    sc = 'S25 catch-up: GELLO off the snapshot by 0.3 rad goes LIVE at once'
+    print(f'\n== {sc}', flush=True)
+    arm.reset_records()
+    arm.set_gello(lambda t: base)
+    n_goal = len(q_goal_lines(a.cm_log))
+    p = start_gate(a.arm, logdir, 'S25')
+    moving = arm.wait_state('MOVING', 15)
+    off = offset(0, 0.3)
+    arm.set_gello(lambda t: off)                     # operator starts moving right after the pedal, then holds still
+    t_move = time.monotonic()
+    ok = arm.wait_state('LIVE', 8)
+    R.check(sc, 'LIVE without waiting for the GELLO to come back', moving and ok,
+            ' -> '.join(dict.fromkeys(arm.state_names())))
+    R.check(sc, 'no HOLD "GELLO off snapshot" wait', not any('GELLO off snapshot' in t for _, t in arm.states))
+    time.sleep(3.0)
+    with arm.lock:
+        live = [(t, q) for t, q in arm.relayed if arm.state_time('LIVE') and t >= arm.state_time('LIVE')]
+        texts = [t for _, t in arm.states]
+    R.check(sc, 'state said "catching up with the GELLO" and then plain LIVE',
+            any('catching up' in t for t in texts) and texts[-1] == 'LIVE', str(texts[-3:]))
+    if live:
+        first = live[0][1]
+        R.check(sc, 'first LIVE command is still the snapshot (no jump at the handover)',
+                max(abs(x - y) for x, y in zip(first, base)) < 0.03,
+                f'{max(abs(x - y) for x, y in zip(first, base)):.3f} rad')
+        v = [abs(b[1][0] - a_[1][0]) / max(b[0] - a_[0], 1e-3) for a_, b in zip(live, live[1:])
+             if b[0] - a_[0] > 0.003 and abs(b[1][0] - off[0]) > 0.05]
+        R.check(sc, 'catch-up speed <= 0.6 rad/s (cap 0.5)', v and max(v) <= 0.6, f'max {max(v) if v else 0:.2f} rad/s')
+        last = live[-1][1]
+        R.check(sc, 'command reached the GELLO', max(abs(x - y) for x, y in zip(last, off)) < 0.03,
+                f'{max(abs(x - y) for x, y in zip(last, off)):.3f} rad')
+        steps = [max(abs(x - y) for x, y in zip(b[1], a_[1])) for a_, b in zip(live, live[1:])]
+        R.check(sc, 'no command step > 0.012 rad', max(steps) <= 0.012, f'{max(steps):.4f}')
+    else:
+        R.check(sc, 'LIVE commands relayed', False)
+    p.send_signal(signal.SIGINT)
+    rc = wait_exit(p, 15)
+    R.check(sc, 'gate exit code 0, controller inactive', rc == 0 and arm.ctrl_state() == 'inactive', f'rc={rc}')
+    check_ramp(a, R, sc, n_goal, base)
+
     # ---- S16: HOLD resync: GELLO moved during the ramp and held still elsewhere -> second ramp to it
     sc = 'S16 HOLD resync'
     print(f'\n== {sc}', flush=True)
@@ -839,7 +880,7 @@ def run_single(a, logdir):
     n_goal = len(q_goal_lines(a.cm_log))
     p = start_gate(a.arm, logdir, 'S16', ['--move-timeout', '3'])
     moving = arm.wait_state('MOVING', 15)
-    moved = offset(0, 0.2)
+    moved = offset(0, 0.8)                           # beyond --catchup-max (0.6): no catch-up, RESYNC instead
     arm.set_gello(lambda t: moved)                   # operator moves the GELLO during the ramp, holds it there
     R.check(sc, 'HOLD (GELLO off snapshot)', moving and arm.wait_state('HOLD', 10),
             ' -> '.join(dict.fromkeys(arm.state_names())))

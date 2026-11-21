@@ -27,9 +27,12 @@ States:
      activate (STRICT)
   MOVING      controller ramps to snapshot (speed factor 0.2); at least min_moving_time;
               FAULT after move_timeout
-  HOLD        robot within converge_tol of snapshot; wait for live GELLO within live_tol of snapshot.
-              RESYNC: if the GELLO is held still out of its holder but > live_tol away for resync_time,
-              deactivate (robot holds), take the new GELLO pose as snapshot and ramp again (fresh instance).
+  HOLD        robot within converge_tol of snapshot. Live GELLO within live_tol -> LIVE. Within catchup_max (default
+              0.6 rad: the operator started moving while the robot was still ramping) -> LIVE at once with a
+              CATCH-UP: the smoothed command leaves the snapshot towards the live GELLO at catchup_vel (0.5 rad/s)
+              until it is within 0.03 rad ("LIVE: catching up with the GELLO"), then normal speed. Further away: wait
+              here; RESYNC: if the GELLO is held still out of its holder for resync_time, deactivate (robot holds),
+              take the new GELLO pose as snapshot and ramp again (fresh instance).
   LIVE        relay live GELLO (+ gripper), SMOOTHED: GELLO arrives at ~25 Hz; raw samples made the controller
               target jump every 40 ms (K = 240 Nm/rad -> torque steps). Each sample starts a linear segment
               from the current output to the sample over the measured sample interval (one sample of delay),
@@ -160,6 +163,8 @@ class LiveSmoother:
         self.t_sample = None
         self.period = period
         self.max_vel = max_vel
+        self.catching = False           # catch-up after the HOLD: slower speed cap until close to the live GELLO
+        self.catch_vel = max_vel
         self.limiter = None             # optional hook(y_old, y_new) -> y (duo collision guard)
 
     def sample(self, q, now):
@@ -180,11 +185,14 @@ class LiveSmoother:
             # in at the capped speed instead of being snapped (which would be a torque step)
             want = min(self.hi[j], max(self.lo[j], s + a * (g - s)))
             d = want - y
-            lim = min(self.max_vel, self.vel_frac * fr3_vel_limit(j, y, 1 if d >= 0 else -1)) * dt
+            vmax = self.catch_vel if self.catching else self.max_vel
+            lim = min(vmax, self.vel_frac * fr3_vel_limit(j, y, 1 if d >= 0 else -1)) * dt
             out.append(y + min(lim, max(-lim, d)))
         if self.limiter is not None:
             out = self.limiter(self.y, out)
         self.y = out
+        if self.catching and max(abs(y - g) for y, g in zip(out, self.goal)) < 0.03:
+            self.catching = False
         return self.y
 
 
@@ -572,7 +580,7 @@ class GelloGate(Node):
         self.set_state('HOLD', f'robot at snapshot; move GELLO within {a.live_tol} rad to go LIVE')
         last_hint = time.monotonic()
         t_still_off = None               # since when the GELLO is held still, out of holder, off the snapshot
-        while maxabs(self.gello[1], snapshot) > a.live_tol:
+        while maxabs(self.gello[1], snapshot) > max(a.live_tol, a.catchup_max):
             self.check_streams()
             now = time.monotonic()
             if a.resync_time > 0 and not self.in_holder(self.gello[1]) and self.gello_still() \
@@ -602,7 +610,7 @@ class GelloGate(Node):
                 far = ', '.join(f'j{i + 1} {x:+.2f}' for i, x in enumerate(d) if abs(x) > a.live_tol)
                 self.set_state('HOLD', f'GELLO off snapshot: {far}')
             self.spin_for(0.01)
-        self.run_live(snapshot)
+        self.run_live(snapshot, catchup=maxabs(self.gello[1], snapshot) > a.live_tol)
 
     def near_limits(self, q):
         """Joints (e.g. ['j4']) within limit_margin of an FR3 joint limit."""
@@ -700,7 +708,7 @@ class GelloGate(Node):
                                 f'(err {maxabs(self.robot[1], snapshot):.3f} rad)')
             self.spin_for(0.01)
 
-    def run_live(self, snapshot):
+    def run_live(self, snapshot, catchup=False):
         # -- LIVE (on_gello relays from here on)
         self.last_relayed = list(snapshot)
         self.last_sample = list(snapshot)
@@ -709,10 +717,15 @@ class GelloGate(Node):
                                          vel_frac=self.a.live_vel_frac, margin=self.a.limit_margin,
                                          soft_min={3: self.a.live_j4_min})
             self.next_live = time.monotonic()
+            if catchup:                  # the GELLO moved on while the robot ramped: follow it, slowly at first
+                self.smoother.catching, self.smoother.catch_vel = True, self.a.catchup_vel
+                self.last_sample = list(self.gello[1])      # (jump guard: steps are measured sample to sample)
+                self.smoother.sample(list(self.gello[1]), time.monotonic())
             if self.geo is not None:
                 self.smoother.limiter = self.guard_limit
         self.relay_target = None
-        self.set_state('LIVE')
+        catching = self.smoother is not None and self.smoother.catching
+        self.set_state('LIVE', 'catching up with the GELLO' if catching else '')
         next_check = time.monotonic() + 1.0
         while True:
             self.check_streams()
@@ -725,6 +738,9 @@ class GelloGate(Node):
                     self.activated = False
                     raise GateError(EXIT_FAULT, f'{CONTROLLER} is "{st}" (deactivated externally?)')
             self.spin_for(0.01)
+            if catching and not self.smoother.catching:
+                catching = False
+                self.set_state('LIVE')
             if self.geo is not None:
                 limited = time.monotonic() - self.guard_hit_t < 0.5
                 if limited and not self.guard_flag:
@@ -810,6 +826,10 @@ def parse_args(argv):
     p.add_argument('--live-j4-min', type=float, default=-2.70,
                    help='LIVE: soft lower limit for j4 [rad]. The left arm hit self_collision_avoidance_violation '
                         'at j4 -2.83 (2026-11-21), before the usable range ends at -2.937 (use -9 to disable)')
+    p.add_argument('--catchup-max', type=float, default=0.6,
+                   help='HOLD: GELLO this far (rad) from the snapshot still goes LIVE, with a slow catch-up')
+    p.add_argument('--catchup-vel', type=float, default=0.5,
+                   help='catch-up speed cap [rad/s] until the command is within 0.03 rad of the GELLO')
     p.add_argument('--live-vel-frac', type=float, default=0.5,
                    help='LIVE: command uses at most this share of the FR3 position-dependent speed limit')
     p.add_argument('--resync-time', type=float, default=2.0,

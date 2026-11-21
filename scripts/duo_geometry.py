@@ -160,6 +160,52 @@ class DuoGeometry:
         return worst
 
 
+READY = [0.0, -0.785398, 0.0, -2.356194, 0.0, 1.570796, 0.785398]    # Franka ready pose: both arms far apart
+
+
+def _moves(g, a0, b0, a1, b1, end_ok, n):
+    """Phases [(left_target|None, right_target|None), ...] that take (left a0, right b0) to (a1, b1) without a
+    collision, trying: both arms at once, left first, right first. None if none of them is collision-free."""
+    a0, b0, a1, b1 = (np.asarray(x, float) for x in (a0, b0, a1, b1))
+    if g.path_collision(a0, a1, b0, b1, n=n, end_ok=end_ok) is None:
+        return [(a1, b1)]
+    if (g.path_collision(a0, a1, b0, b0, n=n, end_ok=end_ok) is None
+            and g.path_collision(a1, a1, b0, b1, n=n, end_ok=end_ok) is None):
+        return [(a1, None), (None, b1)]
+    if (g.path_collision(a0, a0, b0, b1, n=n, end_ok=end_ok) is None
+            and g.path_collision(a0, a1, b1, b1, n=n, end_ok=end_ok) is None):
+        return [(None, b1), (a1, None)]
+    return None
+
+
+def plan_home(g, ql, qr, gl, gr, strategy='auto', waypoint=READY, n=10):
+    """Collision-free way for BOTH arms from (ql, qr) to the home poses (gl, gr), as a list of phases
+    [(left_target|None, right_target|None), ...] (None = that arm stays; a phase with both targets moves both arms at
+    once). Strategies tried in this order ('auto'): both at once; left then right; right then left; the same via the
+    safe ready pose. Every phase is a straight joint-space ramp, which is what the controller executes. The last phase
+    may end inside the margin (the home pose does) but its capsules must not touch. Returns None if nothing works.
+    strategy != 'auto' forces one scheme (diagnostics / tests): simultaneous, left-first, right-first, via-ready."""
+    ql, qr, gl, gr = (np.asarray(x, float) for x in (ql, qr, gl, gr))
+    w = np.asarray(waypoint, float)
+    if strategy == 'simultaneous':
+        return [(gl, gr)]
+    if strategy == 'left-first':
+        return [(gl, None), (None, gr)]
+    if strategy == 'right-first':
+        return [(None, gr), (gl, None)]
+    if strategy == 'via-ready':
+        return [(w, w), (gl, gr)]
+    direct = _moves(g, ql, qr, gl, gr, True, n)
+    if direct is not None:
+        return direct
+    first = _moves(g, ql, qr, w, w, False, n)
+    if first is not None:
+        second = _moves(g, w, w, gl, gr, True, n)
+        if second is not None:
+            return first + second
+    return None
+
+
 def describe(info):
     a, b, d, m = info
     return f'left {a} / right {b}: {d * 100:.1f} cm apart, minimum {m * 100:.0f} cm'

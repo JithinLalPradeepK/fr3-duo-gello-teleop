@@ -4,10 +4,10 @@
   source ~/robot_demo/env/host_env.sh
   python3 ~/robot_demo/scripts/demo_pedal.py
 
-POWBORO FS2020 (PCsensor 3553:b001), programmed with ElfKey as a keyboard:
-  pedal 1 = KEY_A   -> /demo/start
-  pedal 2 = KEY_B   -> /demo/stop
-  pedal 3 = KEY_F12 -> /demo/home
+POWBORO FS2020 (PCsensor 3553:b001), programmed with ElfKey as a keyboard (mapping changed 2026-11-21):
+  pedal 1 = KEY_A   -> /demo/start      START (3 s hold)
+  pedal 2 = KEY_B   -> /demo/stop_home  STOP at once; a stopped teleop is followed by HOME (pressed while HOMING: abort)
+  pedal 3 = KEY_F12 -> /demo/reset      RESET (3 s hold): stop, clear errors, HOME, ready again
 - The pedal is GRABBED exclusively: its keystrokes never reach other windows or desktop shortcuts.
 - LONG PRESS (decision 2026-11-21): START and HOME fire only after the pedal has been held for --hold seconds
   (default 3.0); releasing earlier cancels. STOP stays immediate (--stop-hold 0): it must never be delayed.
@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pedal_logic import HoldLogic  # noqa: E402
 
 DEVICE = '/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd'
-DEFAULT_MAP = 'KEY_A=start,KEY_B=stop,KEY_F12=home'
+DEFAULT_MAP = 'KEY_A=start,KEY_B=stop_home,KEY_F12=reset'
 
 
 class Pedal(Node):
@@ -53,7 +53,9 @@ class Pedal(Node):
         self.svc = {cmd: self.create_client(Trigger, f'/demo/{cmd}') for cmd in set(self.keymap.values())}
         self.pub = self.create_publisher(String, '/demo/pedal/status', 10)
         self.pub_hold = self.create_publisher(String, '/demo/pedal/hold', 10)
-        self.logic = HoldLogic({cmd: (a.stop_hold if cmd == 'stop' else a.hold) for cmd in set(self.keymap.values())})
+        self.logic = HoldLogic({cmd: (a.stop_hold if cmd in ('stop', 'stop_home') else a.hold)
+                                for cmd in set(self.keymap.values())})
+        self.down_t = {}                                 # raw key-down times (diagnostics)
         self.dev = None
         self.last_press = {}
         self.last_event = ''
@@ -69,6 +71,16 @@ class Pedal(Node):
             return
         self.dev = dev
         self.get_logger().info(f'pedal connected and grabbed: {dev.name}')
+
+    def raw_log(self, ev):
+        """Every key event (down / up with the time it was held) - to see how each pedal really behaves."""
+        now, name = time.monotonic(), self.keymap[ev.code]
+        if ev.value == 1:
+            self.down_t[ev.code] = now
+            self.get_logger().info(f'key {evdev.ecodes.KEY[ev.code]} DOWN ({name})')
+        elif ev.value == 0:
+            held = now - self.down_t.pop(ev.code, now)
+            self.get_logger().info(f'key {evdev.ecodes.KEY[ev.code]} UP   ({name}) held {held:.2f} s')
 
     def hold_msg(self, cmd, progress, fired=False):
         self.pub_hold.publish(String(data=json.dumps(
@@ -125,6 +137,7 @@ class Pedal(Node):
                 if r:
                     for ev in self.dev.read():
                         if ev.type == evdev.ecodes.EV_KEY and ev.value in (0, 1, 2) and ev.code in self.keymap:
+                            self.raw_log(ev)
                             self.act(self.logic.on_key(self.keymap[ev.code], ev.value, time.monotonic()))
                 self.act(self.logic.tick(time.monotonic()))
             except OSError as e:

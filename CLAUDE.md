@@ -319,3 +319,30 @@ same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_to
   test/sim_gui_test.py adapted (show_operator() has no section argument any more). UX note for him: on ERROR the camera
   display shows the long message twice (title + PROBLEMS), with the log path. GUI does not show pedal-hold progress yet.
 
+## CHANGES AFTER THE 16:00 HARDWARE TEST (2026-11-21; user requests; sim tests PENDING, demo was open)
+- Findings from the test logs: (1) "START: arms not moving" = robots reached the snapshot, then sat in HOLD because the
+  GELLO had moved on during the ramp (needed to come back within 0.08 rad) -> FIXED by CATCH-UP handover (gate
+  --catchup-max 0.6 / --catchup-vel 0.5: LIVE at once, command leaves the snapshot towards the GELLO at 0.5 rad/s;
+  state "LIVE: catching up with the GELLO"; RESYNC only beyond 0.6 rad). (2) Pedal 3 (KEY_F12) holds were cancelled
+  "released early" 5x, never fired: F12 probably sends a quick pulse (ElfKey mode), pedals 1/2 hold fine. NOT FIXED YET:
+  scripts/pedal_probe.py prints raw events (run it with the demo CLOSED: python3 scripts/pedal_probe.py, hold each pedal
+  ~5 s); demo_pedal.py now logs every key DOWN/UP with the held time. If F12 is a pulse, reprogram that pedal in ElfKey
+  (Downloads/SetupElfKey) to a held key, or move the RESET function to a pedal that holds. (3) The LIVE collision limiter
+  was active dozens of times (gripper/gripper 1.0 cm, once -3.5 cm) and kept the arms from coming close: as the user said.
+  The 16:00:01 right-arm reflex (cartesian_reflex, F_ext <= 8.9 at the last 10 Hz sample, dq 1.2) happened while the
+  grippers were at the 1 cm limit; the left "joint states of the right arm lost" FAULT was only a consequence.
+- USER DECISIONS: collision guard ONLY for HOME (not START/LIVE; --guard-teleop to restore); HOME must be collision-free
+  -> scripts/duo_geometry.plan_home: simultaneous / left-first / right-first / via the ready pose, each phase a straight
+  joint-space ramp; supervisor runs the phases (one-arm phase = only that gate, no --other-arm); status "step i/n: ...".
+  Interpretation: the request said "go such that the robots are colliding" = NOT colliding.
+- NEW PEDALS: 1 = START (3 s hold), 2 = stop_home (immediate STOP, a stopped teleop is followed by HOME after 1 s;
+  pressed during HOMING = abort only; in IDLE nothing), 3 = RESET (3 s hold): macro plan stop -> desk (Desk PREPARE if
+  FCI/brakes/mode not ready) -> bringup (if OFFLINE) / recover (if ERROR or REFLEX; restarts a crashed arm stack) -> home
+  -> "reset complete - ready"; refused while any robot is USER_STOPPED (E-stop pressed); STOP aborts it; 300 s limit.
+  Services /demo/stop_home and /demo/reset; status field "reset" = current step. HOME pre-warm no longer exists (pedal
+  3 is RESET); START pre-warm stays.
+- Files: supervisor (make_home_plan, start_home/next_home_phase, start_reset/reset_tick, stop_home, robot_q subscription),
+  gate (catch-up), pedal (mapping + raw log), pedal_probe.py, tests T6f-T6j + T9 (HOME in two phases), S25 (catch-up),
+  S16 now uses a 0.8 rad offset, geometry G-6 (planner).
+- NEXT: close the demo, run the three sim suites, then hardware: START (catch-up), pedal 2, pedal 3 after an E-stop/reflex.
+

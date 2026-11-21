@@ -146,9 +146,9 @@ def main():
     spin.start()
     R = Results()
 
-    def start_sup(cfg=sim_cfg, home_file=home):
+    def start_sup(cfg=sim_cfg, home_file=home, extra=()):
         log = open(os.path.join(logdir, 'supervisor.log'), 'a')
-        return subprocess.Popen([sys.executable, SUP, '--sim', '--bringup', '--robot-config', cfg,
+        return subprocess.Popen([sys.executable, SUP, '--sim', '--bringup', *extra, '--robot-config', cfg,
                                  '--no-grippers', '--no-gello', '--no-cameras', '--holder-file', holder,
                                  '--home-file', home_file, '--lock-file', os.path.join(logdir, 'home.lock'),
                                  '--gate-args', f'--holder-file {holder} --wait-timeout 8'],
@@ -383,28 +383,104 @@ def main():
         time.sleep(0.2)
     R.check(sc, 'and cancels again', not running(GATE_PATTERN))
 
-    sc = 'T6f HOME pedal held -> standby -> HOME (GO) -> IDLE at home'
+    def teleop_now():
+        gello(MOCK_BASE, MOCK_BASE)
+        c.call('start')
+        return c.wait_state('TELEOP', 25)
+
+    def wait_reset_done(seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            st, m = c.state()
+            if st == 'IDLE' and 'reset complete' in m:
+                return True
+            time.sleep(0.2)
+        return False
+
+    def crash_arm(name):
+        pids = sim_pids(CM_PATTERN + rf' --ros-args -r __ns:=/{name} ')
+        for pid in pids:
+            os.kill(pid, signal.SIGABRT)
+        return len(pids) == 1
+
+    sc = 'T6f pedal 2 (stop_home) in TELEOP: STOP at once, then HOME by itself'
     print(f'\n== {sc}', flush=True)
-    gello(SIM_HOLDER, SIM_HOLDER)
     time.sleep(1.0)
-    hold('home', 2.0)
-    R.check(sc, 'status says arming: home', c.status.get('arming') == 'home', str(c.status.get('arming')))
-    ok, msg = c.call('home')
-    R.check(sc, 'HOME accepted', ok is True, msg)
-    R.check(sc, 'HOMING', c.wait_state('HOMING', 10), c.state()[1])
+    R.check(sc, 'TELEOP', teleop_now(), c.state()[1])
+    t0 = time.monotonic()
+    ok, msg = c.call('stop_home')
+    R.check(sc, 'accepted: stopping, then HOME', ok is True and 'then HOME' in msg, msg)
+    R.check(sc, 'robots stopped within 3 s (STOP is not delayed by the HOME that follows)',
+            c.wait_state('IDLE', 5) and time.monotonic() - t0 < 3.0, f'{time.monotonic() - t0:.2f} s')
+    R.check(sc, 'controllers inactive right after the stop', ctrl('left') == ctrl('right') == 'inactive')
+    R.check(sc, 'HOMING starts by itself', c.wait_state('HOMING', 8), c.state()[1])
     R.check(sc, 'back to IDLE: both arms at home', c.wait_state('IDLE', 60) and 'both arms at home' in c.state()[1],
             c.state()[1])
 
-    sc = 'T6g wrong command after a pre-warm (START held, then HOME) -> standby cancelled, HOME runs normally'
+    sc = 'T6g pedal 2 during HOMING only aborts (no new HOME); in IDLE it does nothing'
+    print(f'\n== {sc}', flush=True)
+    gello(SIM_HOLDER, SIM_HOLDER)
+    time.sleep(1.0)
+    c.call('home')
+    R.check(sc, 'HOMING', c.wait_state('HOMING', 10), c.state()[1])
+    n_home = c.history.count('HOMING')
+    ok, msg = c.call('stop_home')
+    R.check(sc, 'accepted: HOME aborted', ok is True and 'aborted' in msg, msg)
+    R.check(sc, 'IDLE again', c.wait_state('IDLE', 30), c.state()[1])
+    time.sleep(4.0)
+    R.check(sc, 'no new HOMING afterwards', c.state()[0] == 'IDLE' and c.history.count('HOMING') == n_home,
+            f'{c.history[-4:]}')
+    ok, msg = c.call('stop_home')
+    time.sleep(3.0)
+    R.check(sc, 'in IDLE: accepted as a no-op, nothing moves', ok is True and c.state()[0] == 'IDLE'
+            and ctrl('left') == ctrl('right') == 'inactive', f'{msg} / {c.state()}')
+
+    sc = 'T6h pedal 3 (reset) in TELEOP: stop, HOME, ready again'
     print(f'\n== {sc}', flush=True)
     time.sleep(1.0)
-    hold('start', 2.0)
-    R.check(sc, 'pre-warmed for START', c.status.get('arming') == 'start')
-    ok, msg = c.call('home')
-    R.check(sc, 'HOME accepted', ok is True, msg)
-    R.check(sc, 'HOMING then IDLE at home', c.wait_state('HOMING', 20) and c.wait_state('IDLE', 60)
-            and 'both arms at home' in c.state()[1], c.state()[1])
-    R.check(sc, 'no gate left, controllers inactive', not running(GATE_PATTERN) and ctrl('left') == ctrl('right') == 'inactive')
+    R.check(sc, 'TELEOP', teleop_now(), c.state()[1])
+    ok, msg = c.call('reset')
+    R.check(sc, 'reset accepted', ok is True, msg)
+    R.check(sc, 'ends IDLE: reset complete - ready', wait_reset_done(90), c.state()[1])
+    R.check(sc, 'went through STOPPING and HOMING', 'STOPPING' in c.history and 'HOMING' in c.history[-8:], str(c.history[-8:]))
+    R.check(sc, 'status.reset cleared, controllers inactive', c.status.get('reset') is None
+            and ctrl('left') == ctrl('right') == 'inactive', str(c.status.get('reset')))
+
+    sc = 'T6i pedal 3 (reset) after an arm crash: recover (restart arms), HOME, ready again'
+    print(f'\n== {sc}', flush=True)
+    time.sleep(1.0)
+    R.check(sc, 'TELEOP', teleop_now(), c.state()[1])
+    fake.mode = 1
+    R.check(sc, 'crashed the left arm process', crash_arm('left'))
+    R.check(sc, 'ERROR', c.wait_state('ERROR', 30), c.state()[1])
+    gello(SIM_HOLDER, SIM_HOLDER)
+    ok, msg = c.call('reset')
+    R.check(sc, 'reset accepted', ok is True, msg)
+    R.check(sc, 'reset complete - ready (arms restarted, error cleared, at home)', wait_reset_done(150),
+            f'{c.state()}')
+    R.check(sc, 'passed RECOVERING / STARTING_UP / HOMING', {'RECOVERING', 'STARTING_UP', 'HOMING'} <= set(c.history[-14:]),
+            str(c.history[-14:]))
+    R.check(sc, 'controllers inactive, no gate left', ctrl('left') == ctrl('right') == 'inactive' and not running(GATE_PATTERN))
+
+    sc = 'T6j reset refused while an emergency stop is pressed; STOP aborts a running reset'
+    print(f'\n== {sc}', flush=True)
+    fake.mode = 5                                    # USER_STOPPED on both arms
+    time.sleep(1.0)
+    ok, msg = c.call('reset')
+    R.check(sc, 'reset refused: emergency stop still pressed', ok is False and 'emergency stop' in msg, msg)
+    fake.mode = 1
+    time.sleep(1.0)
+    R.check(sc, 'TELEOP', teleop_now(), c.state()[1])
+    ok, msg = c.call('reset')
+    R.check(sc, 'reset accepted', ok is True, msg)
+    time.sleep(0.3)
+    ok, msg = c.call('stop')
+    R.check(sc, 'STOP accepted', ok is True, msg)
+    R.check(sc, 'IDLE', c.wait_state('IDLE', 20), c.state()[1])
+    n_home = c.history.count('HOMING')
+    time.sleep(5.0)
+    R.check(sc, 'the reset was aborted: no HOME followed', c.state()[0] == 'IDLE' and c.history.count('HOMING') == n_home
+            and c.status.get('reset') is None, f'{c.history[-4:]}')
 
     sc = 'T7 supervisor killed (SIGKILL) during TELEOP'
     print(f'\n== {sc}', flush=True)
@@ -464,6 +540,37 @@ def main():
     R.check(sc, 'STOP -> IDLE', ok is True and c.wait_state('IDLE', 20), c.state()[1])
     R.check(sc, 'final message: left DONE, right stopped by STOP',
             'left: stopped - DONE' in c.state()[1] and 'right: stopped - STOPPED' in c.state()[1], c.state()[1])
+    R.check(sc, 'controllers inactive', ctrl('left') == ctrl('right') == 'inactive')
+    sup.send_signal(signal.SIGINT)
+    try:
+        sup.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        sup.kill()
+    R.check(sc, 'supervisor exited, stack shut down', not running(CM_PATTERN) and not running(GATE_PATTERN))
+
+    sc = 'T9 HOME in two phases (--home-strategy left-first): one arm after the other'
+    print(f'\n== {sc}', flush=True)
+    gello(SIM_HOLDER, SIM_HOLDER)
+    c.history.clear()
+    sup = start_sup(sim_cfg, home, extra=['--home-strategy', 'left-first'])
+    R.check(sc, 'bringup IDLE', c.wait_state('IDLE', 90), c.state()[1])
+    ok, msg = c.call('home')
+    R.check(sc, 'HOME accepted', ok is True, msg)
+    seen, end = [], time.monotonic() + 80
+    while time.monotonic() < end:
+        st, m = c.state()
+        if m and (not seen or seen[-1] != m):
+            seen.append(m)
+        if st == 'IDLE' and 'both arms at home' in m:
+            break
+        time.sleep(0.05)
+    steps = [m for m in seen if m.startswith('step ')]
+    R.check(sc, 'status shows step 1/2 and step 2/2', any(m.startswith('step 1/2') for m in steps)
+            and any(m.startswith('step 2/2') for m in steps), str(steps[:2]) + ' ... ' + str(steps[-1:]))
+    R.check(sc, 'phase 1 ran the LEFT gate only, phase 2 the RIGHT gate only',
+            any(m.startswith('step 1/2') and 'left:' in m and 'right:' not in m for m in steps)
+            and any(m.startswith('step 2/2') and 'right:' in m and 'left:' not in m for m in steps), str(steps[:1]) + str(steps[-1:]))
+    R.check(sc, 'ends IDLE: both arms at home', c.state()[0] == 'IDLE' and 'both arms at home' in c.state()[1], c.state()[1])
     R.check(sc, 'controllers inactive', ctrl('left') == ctrl('right') == 'inactive')
     sup.send_signal(signal.SIGINT)
     try:

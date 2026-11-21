@@ -103,6 +103,44 @@ check('HOME-style check to the SAVED home pair: accepted', hit is None, str(hit 
 hit = g.path_collision(mock, q, mock, q * MIRROR, n=10, end_ok=True)
 check('HOME-style check to a pose where the arms touch: refused', hit is not None and hit[1][2] <= 0.005, str(hit and hit[1]))
 
+print('== G-6 HOME planner')
+from duo_geometry import READY, plan_home  # noqa: E402
+ready = np.array(READY)
+ph = plan_home(g, ready, ready, avg_l, avg_r)
+check('from the ready pose both arms can go home at once', ph is not None and len(ph) == 1, str(None if ph is None else len(ph)))
+# a start pose of the left arm that sits on the symmetry plane next to the right arm's home: direct path crosses the arms
+found = None
+for seed in range(400):
+    r2 = np.random.default_rng(seed)
+    ql = r2.uniform([-1, -1, -1, -2.6, -1, 0.9, -1], [1, 1, 1, -1.4, 1, 2.8, 1])
+    qr = ql * MIRROR * 0 + r2.uniform([-1, -1, -1, -2.6, -1, 0.9, -1], [1, 1, 1, -1.4, 1, 2.8, 1])
+    c, info = g.clearance(ql, qr)
+    if c < 0.02 or info[2] < 0.03:
+        continue
+    if g.path_collision(ql, avg_l, qr, avg_r, n=10, end_ok=True) is not None:
+        found = (ql, qr)
+        break
+check('test setup: found a start pair whose DIRECT simultaneous path to home collides', found is not None)
+if found:
+    ql, qr = found
+    ph = plan_home(g, ql, qr, avg_l, avg_r)
+    check('planner finds a collision-free alternative (sequential or via ready) instead of refusing', ph is not None,
+          'none' if ph is None else f'{len(ph)} phase(s): ' + ', '.join('both' if (a is not None and b is not None) else ('left' if a is not None else 'right') for a, b in ph))
+    if ph is not None:
+        cur_l, cur_r, bad = ql.copy(), qr.copy(), []
+        for a, b in ph:                                   # re-verify every phase independently
+            nl = cur_l if a is None else a
+            nr = cur_r if b is None else b
+            if g.path_collision(cur_l, nl, cur_r, nr, n=20, end_ok=True) is not None:
+                bad.append((a is not None, b is not None))
+            cur_l, cur_r = nl, nr
+        check('every phase re-verified on a finer grid (n=20)', not bad, str(bad))
+        check('the plan ends exactly at both home poses', np.allclose(cur_l, avg_l) and np.allclose(cur_r, avg_r))
+ph = plan_home(g, q, q * MIRROR, q, q * MIRROR)            # home pose itself = touching arms
+check('a home target where the arms touch cannot be planned (None)', plan_home(g, ready, ready, q, q * MIRROR) is None)
+check('forced strategies return the fixed schemes', [len(plan_home(g, ready, ready, avg_l, avg_r, strategy=s_)) for s_ in
+      ('simultaneous', 'left-first', 'right-first', 'via-ready')] == [1, 2, 2, 2])
+
 print('== G-5 speed')
 t0 = time.perf_counter()
 for _ in range(200):
