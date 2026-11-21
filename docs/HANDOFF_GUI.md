@@ -18,7 +18,9 @@ Full before/after table: [GUI_CHANGES.md](GUI_CHANGES.md).
   Layout (from the mockup `assets/brand/Home@1x(2).png`, Franka brand colours): header bar (logo, title, HOME, OPERATOR MODE, theme, full screen),
   **ROBO STATUS** list on the left (11 devices, `LivePage.update_model`), 2 x 2 camera grid on the right: **ZED RGB | ZED DEPTH** on top,
   **left wrist | right wrist** below (ASSUMPTION: `d405_1` = left, `d405_2` = right; swap the titles in `CAMERAS` if wrong).
-  Four equal 16:9 tiles (`LivePage.fit_tiles`, ~700 px wide at 1080p; grid margins must stay 0 or the window grows).
+  Four equal 16:9 tiles (`LivePage.fit_tiles`; grid margins must stay 0 or the window grows). **ROBO STATUS slides out with the STATUS button
+  (header) and is CLOSED by default** (visitors must not see it; problems are only visible there, open it to check). Closed: tiles ~875 px wide
+  at 1080p, 8 px gaps (`GAP`), 12 px page margins (`MARGIN`); open: ~735 px. Camera name + fps are badges on the pictures.
   **Depth**: the head camera has its own DEPTH tile (no inset on the ZED RGB tile); the two wrist cameras carry a DEPTH picture-in-picture inset, always on (no switches; `Hub.depth='rgb'`, `Hub.pip=True`).
   Both views are decoded once (Decoder) and only while visible.
   Missing picture = loading animation (see below).

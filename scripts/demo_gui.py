@@ -12,8 +12,8 @@ display 2 (--camera-screen, default 1) = camera page ALWAYS. One monitor / --sin
 Redesign (branch features/GUI-development, see docs/GUI_CHANGES.md):
   HOME      white page, robot image + one line, NO buttons. Foot pedals drive everything.
   LIVE      camera page (opens by itself on START), layout from the design mockup assets/brand/Home@1x(2).png, no
-            navbar: header bar (logo, title, HOME / OPERATOR MODE / theme / full screen), ROBO STATUS device list on
-            the left, 2 x 2 grid: ZED RGB | ZED DEPTH / left wrist | right wrist (wrists carry the DEPTH inset).
+            navbar: header bar (logo, title, HOME / OPERATOR MODE / theme / full screen), ROBO STATUS list (slides out with the
+            STATUS button, closed by default, cameras then fill the screen), 2 x 2 grid: ZED RGB | ZED DEPTH / left wrist | right wrist (wrists carry the DEPTH inset).
   OPERATOR  navbar button (no drop-down; also on the camera display, it opens on the main display): ALL sections at once in a grid (Testing stage, Fix errors, Robot setup,
             Status, System, Log) = all of Jithin's old buttons.
   NAVBAR    logo (black/white with the mode), LEFT / RIGHT arm chips, CAMERAS chip (click = the 3 cameras),
@@ -33,7 +33,7 @@ import time
 
 import rclpy
 from PyQt5.QtCore import (QBuffer, QByteArray, QEasingCurve, QEvent, QIODevice, QObject, QPoint, QPropertyAnimation, QRectF,
-                          QSize, Qt, QTimer, pyqtProperty, pyqtSignal)
+                          QSize, Qt, QTimer, QVariantAnimation, pyqtProperty, pyqtSignal)
 from PyQt5.QtGui import (QColor, QFont, QImage, QImageReader, QLinearGradient, QPainter, QPainterPath, QPen,
                          QPixmap)
 from PyQt5.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel,
@@ -482,7 +482,7 @@ class ImageView(QWidget):
     def __init__(self, rounded=True, framed=True, icon=False, clickable=False):
         super().__init__()
         self.pm, self.text, self.rounded, self.framed, self.icon = None, '', rounded, framed, icon
-        self.loading, self.phase, self.badge = False, 0.0, ''
+        self.loading, self.phase, self.badge, self.badge_r = False, 0.0, '', ''
         self.valign = 'center'                   # 'bottom': picture sits on the bottom edge (FR3 Duo in the sidebar)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setMinimumSize(120, 90)
@@ -564,17 +564,20 @@ class ImageView(QWidget):
                     p.drawText(area, Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap, self.text)
             else:
                 p.drawText(area, Qt.AlignCenter | Qt.TextWordWrap, self.text)
-        if self.badge:                          # small label in the corner: RGB / DEPTH
-            f = QFont(T.HEAD, 7 if small else 8)
+        for text, right in ((self.badge, False), (self.badge_r, True)):   # corner labels: camera name / fps
+            if not text:
+                continue
+            f = QFont(T.HEAD, 7 if small else 9)
             f.setWeight(QFont.Bold)
             p.setFont(f)
-            w = p.fontMetrics().horizontalAdvance(self.badge) + 16
-            h = p.fontMetrics().height() + 6
+            w = p.fontMetrics().horizontalAdvance(text) + 18
+            h = p.fontMetrics().height() + 8
+            x = self.width() - w - 10 if right else 10
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(0, 0, 0, 150))
-            p.drawRoundedRect(QRectF(8, 8, w, h), h / 2, h / 2)
+            p.drawRoundedRect(QRectF(x, 10, w, h), h / 2, h / 2)
             p.setPen(QColor(T.WHITE))
-            p.drawText(QRectF(8, 8, w, h), Qt.AlignCenter, self.badge)
+            p.drawText(QRectF(x, 10, w, h), Qt.AlignCenter, text)
 
 
 def label(text, name='value', wrap=False):
@@ -820,6 +823,17 @@ class PipView(ImageView):
         super().resizeEvent(e)
 
 
+class _Fps:
+    """tile.fps.setText('30 FPS') -> small badge in the picture's top-right corner."""
+
+    def __init__(self, tile):
+        self.tile = tile
+
+    def setText(self, text):
+        self.tile.view.badge_r = text
+        self.tile.view.update()
+
+
 class CameraTile(QWidget):
     """Title + main RGB picture (16:9) with the DEPTH view as a small picture-in-picture inset (always on)."""
 
@@ -829,14 +843,9 @@ class CameraTile(QWidget):
         self.objs = {'rgb': NO_SIGNAL, 'depth': NO_SIGNAL}
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(8)
-        h = QHBoxLayout()
-        self.title = label(title.upper(), 'caption')
-        self.fps = label('', 'mono')
-        h.addWidget(self.title)
-        h.addStretch(1)
-        h.addWidget(self.fps)
-        v.addLayout(h)
+        v.setSpacing(0)
+        self.name = title.upper()
+        self.fps = _Fps(self)
         self.view = PipView()
         v.addWidget(self.view, 1)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -846,7 +855,7 @@ class CameraTile(QWidget):
 
     def height_for(self, w):
         """Tile height for a given width: title row + 16:9 picture."""
-        return self.title.sizeHint().height() + 8 + int(w * 9 / 16)
+        return int(w * 9 / 16)
 
     def set_frame(self, mode, obj):
         self.objs[mode] = obj
@@ -862,14 +871,14 @@ class CameraTile(QWidget):
     def render(self):
         if self.depth_only:                   # separate DEPTH tile (head camera), no inset
             self.show(self.view, self.objs['depth'])
-            self.view.badge = 'DEPTH'
+            self.view.badge = self.name
             self.view.inset.setVisible(False)
             self.view.update()
             return
         main = self.hub.depth
         other = 'rgb' if main == 'depth' else 'depth'
         self.show(self.view, self.objs[main])
-        self.view.badge = main.upper()
+        self.view.badge = f'{self.name}  ·  {main.upper()}'
         # inset only while there is a picture to show (a missing camera shows just the loading animation)
         show_inset = self.pip and self.hub.pip and (isinstance(self.objs[main], QPixmap) or isinstance(self.objs[other], QPixmap))
         self.view.inset.setVisible(show_inset)
@@ -929,7 +938,8 @@ class LivePage(QWidget):
         ZED Mini RGB | ZED Mini DEPTH
         left wrist (+ depth inset) | right wrist (+ depth inset)"""
     SIDE_W = 410
-    GAP = 20
+    GAP = 8                               # small gap between the camera pictures
+    MARGIN = 12                           # small margin around the page
 
     ROWS = [('ROBOTS', [('arm_left', 'FR3 Left Arm', 0), ('arm_right', 'FR3 Right Arm', 0)]),
             ('END EFFECTORS', [('grip', 'Gripper', 0), ('grip_left', 'Left Gripper', 1), ('grip_right', 'Right Gripper', 1)]),
@@ -941,15 +951,16 @@ class LivePage(QWidget):
         super().__init__()
         self.hub = hub
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 24, 32, 24)
+        root.setContentsMargins(self.MARGIN, self.MARGIN, self.MARGIN, self.MARGIN)
         root.setSpacing(self.GAP)
+        self.side_w, self.status_open = 0, False
 
         # ---- header bar: logo + title left, controls (moved in by MainWindow) right
         self.header = QFrame()
         self.header.setObjectName('card')
         hl = QHBoxLayout(self.header)
-        hl.setContentsMargins(28, 14, 20, 14)
-        hl.setSpacing(24)
+        hl.setContentsMargins(20, 8, 12, 8)
+        hl.setSpacing(20)
         self.logo = QLabel()
         self.logo.setObjectName('plain')
         hl.addWidget(self.logo, 0, Qt.AlignVCenter)
@@ -969,7 +980,8 @@ class LivePage(QWidget):
         # ---- ROBO STATUS list
         self.panel = QFrame()
         self.panel.setObjectName('card')
-        self.panel.setFixedWidth(self.SIDE_W)
+        self.panel.setFixedWidth(1)
+        self.panel.hide()                                  # status window is closed by default (visitors don't see it)
         sv = QVBoxLayout(self.panel)
         sv.setContentsMargins(20, 18, 20, 18)
         sv.setSpacing(8)
@@ -1006,6 +1018,7 @@ class LivePage(QWidget):
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)               # no margins: tile sizes add up exactly (no window growth)
         grid.setSpacing(self.GAP)
+        grid.setAlignment(Qt.AlignCenter)
         grid.addWidget(self.tiles['zed'], 0, 0)
         grid.addWidget(self.zed_depth, 0, 1)
         grid.addWidget(self.tiles['d405_1'], 1, 0)
@@ -1016,6 +1029,29 @@ class LivePage(QWidget):
         gw.setLayout(grid)
         body.addWidget(gw, 1)
         root.addLayout(body, 1)
+
+    def set_status_open(self, on):
+        """Slide the ROBO STATUS window in / out; the cameras grow to fill the freed width."""
+        if on == self.status_open:
+            return
+        self.status_open = on
+        if on:
+            self.panel.show()
+        if not hasattr(self, 'anim'):
+            self.anim = QVariantAnimation(self)
+            self.anim.setDuration(260)
+            self.anim.setEasingCurve(QEasingCurve.InOutCubic)
+            self.anim.valueChanged.connect(self._set_side)
+            self.anim.finished.connect(lambda: self.panel.setVisible(self.status_open))
+        self.anim.stop()
+        self.anim.setStartValue(self.side_w)
+        self.anim.setEndValue(self.SIDE_W if on else 0)
+        self.anim.start()
+
+    def _set_side(self, v):
+        self.side_w = int(v)
+        self.panel.setFixedWidth(max(self.side_w, 1))
+        self.fit_tiles()
 
     def frame(self, key, mode, obj):
         self.tiles[key].set_frame(mode, obj)
@@ -1033,14 +1069,14 @@ class LivePage(QWidget):
             t.refresh()
 
     def fit_tiles(self):
-        """Four equal 16:9 tiles that fill the area right of the status list (2 x 2)."""
+        """Four equal 16:9 tiles (2 x 2) that fill everything not used by the header and the status window."""
         m = self.layout().contentsMargins()
-        avail_w = self.width() - m.left() - m.right() - self.SIDE_W - self.GAP
+        side = (self.side_w + self.GAP) if self.side_w > 0 else 0
+        avail_w = self.width() - m.left() - m.right() - side
         avail_h = self.height() - m.top() - m.bottom() - self.header.sizeHint().height() - self.GAP
         if avail_w <= 200 or avail_h <= 200:
             return
-        hdr = self.tiles['zed'].height_for(0)
-        tw = min((avail_w - self.GAP) / 2, ((avail_h - self.GAP) / 2 - hdr) * 16 / 9)
+        tw = min((avail_w - self.GAP) / 2, (avail_h - self.GAP) / 2 * 16 / 9)
         for t in (*self.tiles.values(), self.zed_depth):
             t.setFixedWidth(int(tw))
             t.setFixedHeight(t.height_for(int(tw)))
@@ -1384,11 +1420,12 @@ class MainWindow(ConfirmClose, QWidget):
                 b.clicked.connect(slot)
             return b
         self.b_home = navbtn('HOME', self.go_home)                    # camera page only
+        self.b_status = navbtn(slot=lambda: self.set_status(not self.live.status_open))   # camera page only
         self.b_operator = navbtn('OPERATOR MODE', self.open_operator)   # no drop-down: opens the operator panel
         self.b_theme = navbtn(slot=lambda: hub.set_theme('dark' if hub.theme == 'light' else 'light'))
         self.b_full = navbtn(slot=self.toggle_full)
         self.main_window = self                      # the camera window points at the main window (see main())
-        for w in (self.chip_left, self.chip_right, self.chip_cams, self.b_home, self.b_operator, self.b_theme, self.b_full):
+        for w in (self.chip_left, self.chip_right, self.chip_cams, self.b_status, self.b_home, self.b_operator, self.b_theme, self.b_full):
             cl.addWidget(w)
         nl.addWidget(self.controls)
         self.nav, self.controls_host = nav, nl
@@ -1421,6 +1458,7 @@ class MainWindow(ConfirmClose, QWidget):
         hub.theme_changed.connect(self.apply_theme)
         self.apply_theme(hub.theme)
         self.b_full.setText('FULL SCREEN')
+        self.set_status(False)                # camera page: status window closed by default
         if role == 'camera':
             self.show_page(self.LIVE)
 
@@ -1433,6 +1471,7 @@ class MainWindow(ConfirmClose, QWidget):
         for chip in (self.chip_left, self.chip_right, self.chip_cams):
             chip.setVisible(not on_live)
         self.b_home.setVisible(on_live)
+        self.b_status.setVisible(on_live)
         self.controls_host.removeWidget(self.controls)
         self.controls_host = self.live.strip if on_live else self.nav.layout()
         self.controls_host.addWidget(self.controls)
@@ -1459,6 +1498,10 @@ class MainWindow(ConfirmClose, QWidget):
         if w is not self:
             w.raise_()
             w.activateWindow()
+
+    def set_status(self, on):
+        self.live.set_status_open(on)
+        self.b_status.setText('STATUS  ◂' if on else 'STATUS  ▸')
 
     def toggle_full(self):
         """Full screen <-> normal window (with the title bar's minimise / maximise buttons)."""
@@ -1779,12 +1822,14 @@ def run_screenshots(app, outdir, windows, hub, feeder):
     at(5.8, lambda: shot('3_home_ready_dark'))
     at(6.0, lambda: hub.set_theme('light'))
     at(6.2, lambda: feeder.pedal('start'))
-    at(10.0, lambda: shot('4_live_default_light'))
-    at(10.2, lambda: feeder.toggle_depth())
-    at(11.4, lambda: shot('5_live_depth_na_light'))
-    at(11.6, lambda: (feeder.toggle_depth(), feeder.toggle_cam(), hub.set_theme('dark')))
-    at(13.0, lambda: shot('6_live_camdrop_dark'))
-    at(13.2, lambda: (feeder.toggle_cam(), hub.set_theme('light'), feeder.error()))
+    at(10.0, lambda: shot('4_live_status_OFF_light'))
+    at(10.2, lambda: win.set_status(True))
+    at(11.4, lambda: shot('5_live_status_ON_light'))
+    at(11.6, lambda: (win.set_status(False), feeder.toggle_cam(), hub.set_theme('dark')))
+    at(13.2, lambda: shot('6_live_camdrop_status_OFF_dark'))
+    at(13.4, lambda: win.set_status(True))
+    at(14.6, lambda: shot('7_live_camdrop_status_ON_dark'))
+    at(14.8, lambda: (win.set_status(False), feeder.toggle_cam(), hub.set_theme('light'), feeder.error()))
     at(17.2, lambda: shot('9_home_error_light'))
     at(17.4, lambda: win.open_operator())
     at(18.2, lambda: shot('10_operator_light'))
