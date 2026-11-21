@@ -11,17 +11,17 @@ Full before/after table: [GUI_CHANGES.md](GUI_CHANGES.md).
 
 - **Home**: white page, FR3 Duo picture, one line, no buttons. Pedals drive everything.
 - **Navbar**: logo (black on light, white on dark), LEFT ARM / RIGHT ARM / CAMERAS chips (click = details popup),
-  STATUS (camera page only), OPERATOR button (no drop-down), light / dark switch (light default), FULL SCREEN <-> window button.
+  OPERATOR button (no drop-down), light / dark switch (light default), FULL SCREEN <-> window button.
+  On the camera page the navbar is hidden: a header bar (logo, title, HOME, OPERATOR MODE, theme, full screen) replaces it.
   Chip connected = Franka Dark Blue + blinking green dot; not connected = light Franka Grey + blinking red dot.
 - **Live (camera) page**: opens on `TELEOP_STARTING` / `TELEOP`, back to Home on STOP / error.
-  Layout: ZED Mini overview centre, **left wrist bottom-left, right wrist bottom-right** (ASSUMPTION: `d405_1` = left, `d405_2` = right;
-  swap the titles in `CAMERAS` if wrong). Tiles are 16:9 and sized to fill the page (`LivePage.fit_tiles`: ZED row + wrist row fill the height under the toolbar,
-  wrists = 62 % of the ZED width via `WRIST_RATIO`; at 1080p: ZED ~935 px, wrists ~580 px wide).
-  **Depth = picture-in-picture** on every camera: RGB main picture + DEPTH inset, always on (no switches; `Hub.depth='rgb'`, `Hub.pip=True`).
+  Layout (from the mockup `assets/brand/Home@1x(2).png`, Franka brand colours): header bar (logo, title, HOME, OPERATOR MODE, theme, full screen),
+  **ROBO STATUS** list on the left (11 devices, `LivePage.update_model`), 2 x 2 camera grid on the right: **ZED RGB | ZED DEPTH** on top,
+  **left wrist | right wrist** below (ASSUMPTION: `d405_1` = left, `d405_2` = right; swap the titles in `CAMERAS` if wrong).
+  Four equal 16:9 tiles (`LivePage.fit_tiles`, ~700 px wide at 1080p; grid margins must stay 0 or the window grows).
+  **Depth**: the head camera has its own DEPTH tile (no inset on the ZED RGB tile); the two wrist cameras carry a DEPTH picture-in-picture inset, always on (no switches; `Hub.depth='rgb'`, `Hub.pip=True`).
   Both views are decoded once (Decoder) and only while visible.
-  **Status panel** = slide panel (STATUS button in the navbar), **default closed**; opens in the free space beside the ZED overview
-  (top-left). The ZED never moves (fixed-width side slots). While closed, real errors show in the bar under the navbar.
-  Problems in plain words in the panel. Missing picture = loading animation (see below).
+  Missing picture = loading animation (see below).
 - **Two monitors**: display 1 (`--control-screen`, default 0) shows Home / Operator and switches to the Live page on START (back to Home on STOP);
   display 2 (`--camera-screen`, default 1) shows the Live page ALWAYS. Its OPERATOR button opens the operator panel on display 1.
   Cameras are decoded once and shared. Both windows start FULL SCREEN; the FULL SCREEN button switches to a normal window.
