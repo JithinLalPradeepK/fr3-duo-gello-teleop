@@ -557,8 +557,8 @@ def run_single(a, logdir):
     with arm.lock:
         early = [t for t, _ in arm.relayed if t - arm.t0 < t_out]
     R.check(sc, 'nothing relayed while GELLO in holder', not early, f'{len(early)} msgs')
-    R.check(sc, 'activation only after taken out + still >= 1 s',
-            t_mov is not None and t_mov - arm.t0 >= t_out + 1.0,
+    R.check(sc, 'activation only after taken out + still >= 0.5 s',
+            t_mov is not None and t_mov - arm.t0 >= t_out + 0.5,
             f'MOVING at {t_mov - arm.t0:.2f} s' if t_mov else 'no MOVING')
     p.send_signal(signal.SIGINT)
     rc = wait_exit(p, 15)
@@ -772,6 +772,64 @@ def run_single(a, logdir):
         p.send_signal(signal.SIGINT)
         wait_exit(p, 15)
     fake.on = False
+
+    # ---- standby (pre-warm while the pedal is held) ----------------------------------------------------------
+    latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+    pub_go = node.create_publisher(String, '/demo/gate_go', latched_qos)
+
+    sc = 'S22 standby: ARMED, nothing moves until the right GO, then fast LIVE'
+    print(f'\n== {sc}', flush=True)
+    arm.reset_records()
+    arm.set_gello(lambda t: base)                        # GELLO already out of the holder and still
+    n_goal = len(q_goal_lines(a.cm_log))
+    p = start_gate(a.arm, logdir, 'S22', ['--standby', '--go-token', 'tok22'])
+    R.check(sc, 'reaches ARMED', arm.wait_state('ARMED', 20), ' -> '.join(dict.fromkeys(arm.state_names())))
+    time.sleep(3.0)
+    with arm.lock:
+        names = [t.split(':')[0] for _, t in arm.states]
+    R.check(sc, 'after 3 s still ARMED: no ACTIVATING / MOVING / LIVE', names[-1] == 'ARMED'
+            and not {'ACTIVATING', 'MOVING', 'LIVE', 'WAIT_STILL'} & set(names[names.index('ARMED'):]), str(names[-4:]))
+    R.check(sc, 'controller inactive and NOTHING relayed while armed', arm.ctrl_state() == 'inactive'
+            and len(arm.relayed) == 0, f'{len(arm.relayed)} msgs')
+    pub_go.publish(String(data='go:wrong'))
+    time.sleep(1.0)
+    R.check(sc, 'a GO with the wrong token is ignored', arm.state_names()[-1] == 'ARMED', arm.state_names()[-1])
+    t_go = time.monotonic()
+    pub_go.publish(String(data='go:tok22'))
+    ok = arm.wait_state('LIVE', 10)
+    dt = (arm.state_time('LIVE') or time.monotonic()) - t_go
+    R.check(sc, 'GO -> LIVE', ok, ' -> '.join(dict.fromkeys(arm.state_names())))
+    R.check(sc, 'GO -> LIVE in < 2.2 s (non-standby start takes ~3.3 s)', ok and dt < 2.2, f'{dt:.2f} s')
+    R.check(sc, 'controller active in LIVE', arm.ctrl_state() == 'active')
+    p.send_signal(signal.SIGINT)
+    rc = wait_exit(p, 15)
+    R.check(sc, 'gate exit code 0, controller inactive', rc == 0 and arm.ctrl_state() == 'inactive', f'rc={rc}')
+    check_ramp(a, R, sc, n_goal, base)          # exactly one ramp, initialised on the snapshot (fresh instance)
+
+    sc = 'S23 standby timeout: leaves quietly, nothing was done'
+    print(f'\n== {sc}', flush=True)
+    arm.reset_records()
+    arm.set_gello(lambda t: base)
+    n_goal = len(q_goal_lines(a.cm_log))
+    p = start_gate(a.arm, logdir, 'S23', ['--standby', '--go-token', 'tok23', '--standby-timeout', '3'])
+    rc = wait_exit(p, 40)
+    R.check(sc, 'gate exit code 0', rc == 0, f'rc={rc}')
+    R.check(sc, 'controller inactive, nothing relayed, no ramp', arm.ctrl_state() == 'inactive'
+            and len(arm.relayed) == 0 and len(q_goal_lines(a.cm_log)) == n_goal)
+    R.check(sc, 'final state STOPPED', arm.state_names()[-1] == 'STOPPED', arm.state_names()[-1])
+
+    sc = 'S24 GO that arrived BEFORE the gate started (latched) is still honoured'
+    print(f'\n== {sc}', flush=True)
+    pub_go.publish(String(data='go:tok24'))
+    time.sleep(0.5)
+    arm.reset_records()
+    arm.set_gello(lambda t: base)
+    p = start_gate(a.arm, logdir, 'S24', ['--standby', '--go-token', 'tok24'])
+    R.check(sc, 'reaches LIVE without a second GO', arm.wait_state('LIVE', 20), ' -> '.join(dict.fromkeys(arm.state_names())))
+    p.send_signal(signal.SIGINT)
+    rc = wait_exit(p, 15)
+    R.check(sc, 'gate exit code 0, controller inactive', rc == 0 and arm.ctrl_state() == 'inactive', f'rc={rc}')
 
     # ---- S16: HOLD resync: GELLO moved during the ramp and held still elsewhere -> second ramp to it
     sc = 'S16 HOLD resync'

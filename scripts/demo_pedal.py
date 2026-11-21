@@ -9,8 +9,12 @@ POWBORO FS2020 (PCsensor 3553:b001), programmed with ElfKey as a keyboard:
   pedal 2 = KEY_B   -> /demo/stop
   pedal 3 = KEY_F12 -> /demo/home
 - The pedal is GRABBED exclusively: its keystrokes never reach other windows or desktop shortcuts.
-- Acts on key-down only (ignores auto-repeat / key-up). STOP is never debounced; START/HOME ignore a
-  second press within --debounce s.
+- LONG PRESS (decision 2026-11-21): START and HOME fire only after the pedal has been held for --hold seconds
+  (default 3.0); releasing earlier cancels. STOP stays immediate (--stop-hold 0): it must never be delayed.
+  After firing, release the pedal before it can fire again. Logic + tests: scripts/pedal_logic.py,
+  test/pedal_logic_test.py.
+- Publishes /demo/pedal/hold (JSON, ~10 Hz while a pedal is held; GUI progress bar / supervisor pre-warm):
+    {"pedal": "start"|"home"|null, "progress": 0..1, "hold_s": 3.0, "fired": bool}
 - Publishes /demo/pedal/status (JSON) at 1 Hz only while the pedal is connected (GUI "Pedal" light).
 - Reconnects automatically if the pedal is unplugged.
 Needs /etc/udev/rules.d/99-footswitch-event.rules (event* readable by group pcsensorhid).
@@ -22,12 +26,17 @@ import signal
 import sys
 import time
 
+import os
+
 import evdev
 import rclpy
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pedal_logic import HoldLogic  # noqa: E402
 
 DEVICE = '/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd'
 DEFAULT_MAP = 'KEY_A=start,KEY_B=stop,KEY_F12=home'
@@ -43,6 +52,8 @@ class Pedal(Node):
             self.keymap[evdev.ecodes.ecodes[key.strip()]] = cmd.strip()
         self.svc = {cmd: self.create_client(Trigger, f'/demo/{cmd}') for cmd in set(self.keymap.values())}
         self.pub = self.create_publisher(String, '/demo/pedal/status', 10)
+        self.pub_hold = self.create_publisher(String, '/demo/pedal/hold', 10)
+        self.logic = HoldLogic({cmd: (a.stop_hold if cmd == 'stop' else a.hold) for cmd in set(self.keymap.values())})
         self.dev = None
         self.last_press = {}
         self.last_event = ''
@@ -59,8 +70,27 @@ class Pedal(Node):
         self.dev = dev
         self.get_logger().info(f'pedal connected and grabbed: {dev.name}')
 
+    def hold_msg(self, cmd, progress, fired=False):
+        self.pub_hold.publish(String(data=json.dumps(
+            {'pedal': cmd, 'progress': round(progress, 3), 'hold_s': self.a.hold, 'fired': fired})))
+
+    def act(self, acts):
+        for a in acts:
+            if a[0] == 'fire':
+                self.press(a[1])
+            elif a[0] == 'progress':
+                self.hold_msg(a[1], a[2], a[2] >= 1.0)
+            elif a[0] == 'cancel':
+                self.get_logger().info(f'pedal {a[1].upper()} hold cancelled ({a[2]})')
+                self.hold_msg(None, 0.0)
+            elif a[0] == 'done':
+                self.hold_msg(None, 0.0)
+
     def disconnect(self, why):
         self.get_logger().warn(f'pedal disconnected: {why}')
+        if self.logic.cur:
+            self.logic.cur = None
+            self.hold_msg(None, 0.0)
         try:
             self.dev.ungrab()
         except OSError:
@@ -94,8 +124,9 @@ class Pedal(Node):
                 r, _, _ = select.select([self.dev.fd], [], [], 0.02)
                 if r:
                     for ev in self.dev.read():
-                        if ev.type == evdev.ecodes.EV_KEY and ev.value == 1 and ev.code in self.keymap:
-                            self.press(self.keymap[ev.code])
+                        if ev.type == evdev.ecodes.EV_KEY and ev.value in (0, 1, 2) and ev.code in self.keymap:
+                            self.act(self.logic.on_key(self.keymap[ev.code], ev.value, time.monotonic()))
+                self.act(self.logic.tick(time.monotonic()))
             except OSError as e:
                 self.disconnect(e)
             if self.dev is not None and now >= self.next_beat:
@@ -109,6 +140,8 @@ def main():
     ap.add_argument('--device', default=DEVICE)
     ap.add_argument('--map', default=DEFAULT_MAP, help=f'default {DEFAULT_MAP}')
     ap.add_argument('--debounce', type=float, default=0.3, help='START/HOME only (s)')
+    ap.add_argument('--hold', type=float, default=3.0, help='START/HOME: hold the pedal this long (s)')
+    ap.add_argument('--stop-hold', type=float, default=0.0, help='STOP: 0 = immediate (never delay a stop)')
     a = ap.parse_args(rclpy.utilities.remove_ros_args(sys.argv)[1:])
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)   # own handlers: no rclpy traceback on exit
     stop = []

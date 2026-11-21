@@ -42,6 +42,11 @@ States:
 TARGET MODE (HOME): --target-joints q1,..,q7 - no GELLO, no holder check, no LIVE: the same fresh-instance +
   snapshot-relay + ramp path drives the arm to the given pose; once converged it holds for target_hold s,
   deactivates (robot holds) and exits 0 with state DONE.
+STANDBY (--standby --go-token T; used by the supervisor while a START / HOME pedal is being held): the gate does
+  everything that takes time WITHOUT touching the robot - start-up, DDS discovery, loading a fresh (inactive)
+  controller instance - and waits in state ARMED. Only the message "go:T" on /demo/gate_go lets it continue with the
+  normal sequence (WAIT_STILL -> BARRIER -> activation ...), so nothing moves before the long press is complete.
+  No GO within standby_timeout -> exit 0 (nothing was done). Saves ~2.5 s between pedal and LIVE.
 DUO COLLISION GUARD (--other-arm <arm>, set by the supervisor for both gates; scripts/duo_geometry.py,
 config/duo_guard.yaml; FR3 Duo kinematics + capsules fitted to the FR3 collision meshes):
   BARRIER     before any motion both gates wait until both arms' goals are known (each gate publishes its goal on
@@ -198,6 +203,8 @@ class GelloGate(Node):
         self.robot = None               # (t_monotonic, [7])
         self.robot_idx = None
         self.last_relayed = None
+        self.go_ok = False              # standby: GO received
+        self.preloaded = False          # a fresh inactive controller instance is already loaded + DDS-matched
         self.geo = None                 # DuoGeometry when the collision guard is on (--other-arm)
         self.other_q = self.other_cmd = None      # (t_monotonic, [7]) of the other arm: robot / commanded
         self.other_state = ''
@@ -233,6 +240,8 @@ class GelloGate(Node):
         self.create_subscription(Float32, f'/gello_check_{a.arm}/gripper/gripper_client/'
                                  'target_gripper_width_percent', self.on_gripper, 10)
         self.create_subscription(JointState, f'/{a.arm}/franka/joint_states', self.on_robot, 10)
+        if a.standby:
+            self.create_subscription(String, '/demo/gate_go', self.on_go, latched)
         if a.other_arm:
             if a.other_arm == a.arm:
                 raise SystemExit('--other-arm must be the other arm')
@@ -336,6 +345,10 @@ class GelloGate(Node):
             self.get_logger().info(f'robot joints: {[msg.name[i] for i in idx]}')
         self.robot = (time.monotonic(), [msg.position[i] for i in self.robot_idx])
 
+    def on_go(self, msg):
+        if msg.data == f'go:{self.a.go_token}':
+            self.go_ok = True
+
     def on_other_robot(self, msg):
         if self.other_idx is None:
             idx = []
@@ -432,7 +445,8 @@ class GelloGate(Node):
         own0, other0, other1 = list(self.robot[1]), list(self.other_q[1]), list(self.other_cmd[1])
         ql0, ql1, qr0, qr1 = ((own0, own_goal, other0, other1) if a.arm == 'left'
                               else (other0, other1, own0, own_goal))
-        hit = self.geo.path_collision(ql0, ql1, qr0, qr1, n=a.guard_samples)
+        # HOME (target mode): the target pose is chosen on purpose and may sit inside the margin (the home poses do)
+        hit = self.geo.path_collision(ql0, ql1, qr0, qr1, n=a.guard_samples, end_ok=self.target is not None)
         if hit is not None:
             c, info, fl, fr = hit
             raise GateError(EXIT_REFUSED, f'{what}: the arms would collide on the way - {describe(info)} '
@@ -506,6 +520,8 @@ class GelloGate(Node):
             raise GateError(EXIT_REFUSED, f'{self.other_publishers()} other publisher(s) on '
                             f'{self.pub_cmd.topic_name} (another gate, or GELLO wired straight to the '
                             'controller?) - not starting')
+        if a.standby:
+            self.standby_wait()
         if self.target is not None:
             return self.run_target()
         if self.holder is None and not a.no_holder_check:
@@ -625,11 +641,11 @@ class GelloGate(Node):
             self.spin_for(0.01)
         self.done = True              # main() deactivates -> robot holds at the target
 
-    def activate_and_move(self, snapshot, what):
-        """Relay snapshot BEFORE activation, fresh controller instance, activate, ramp until converged."""
-        a = self.a
-        self.relay_target = snapshot
-        self.spin_for(0.2)
+    def load_fresh_controller(self):
+        """Unload the used controller instance and load + configure a FRESH one (inactive): the stock controller only
+        resets its ramp flags in the constructor, so every activation needs a new instance. Waits until DDS has
+        matched the new instance's subscription (it subscribes in on_configure) - otherwise it could miss the
+        snapshot and initialise its ramp on later (live) data."""
         n_subs = self.pub_cmd.get_subscription_count()   # includes the old controller instance
         self.call('unload', UnloadController.Request(name=CONTROLLER))
         self.wait_subs(lambda n: n < n_subs, 'old controller subscription to disappear')
@@ -639,10 +655,35 @@ class GelloGate(Node):
             raise GateError(EXIT_FAULT, 'configure_controller failed')
         if self.controller_states().get(CONTROLLER) != 'inactive':
             raise GateError(EXIT_FAULT, 'reloaded controller is not inactive')
-        # The new instance subscribes in on_configure: make sure DDS has matched it before activating,
-        # otherwise it misses the snapshot and initialises its ramp on later (live) data.
         self.wait_subs(lambda n: n >= n_subs, 'new controller subscription to match')
-        self.spin_for(0.2)
+
+    def standby_wait(self):
+        """Pre-load a fresh controller instance, then wait for GO (nothing moves, nothing is relayed)."""
+        self.load_fresh_controller()
+        self.preloaded = True
+        self.set_state('ARMED', 'ready, waiting for GO')
+        t0 = time.monotonic()
+        while not self.go_ok:
+            self.check_streams()
+            if time.monotonic() - t0 > self.a.standby_timeout:
+                self.get_logger().info(f'no GO within {self.a.standby_timeout:.0f} s - leaving standby')
+                raise StopRequested()
+            self.spin_for(0.01)
+        self.get_logger().info(f'GO after {time.monotonic() - t0:.1f} s in standby')
+        self.set_state('WAIT_STILL', 'take GELLO out of its holder and hold it still' if self.target is None
+                       else 'waiting for robot data')
+
+    def activate_and_move(self, snapshot, what):
+        """Relay snapshot BEFORE activation, fresh controller instance, activate, ramp until converged."""
+        a = self.a
+        self.relay_target = snapshot
+        if self.preloaded:                  # standby already loaded a fresh instance and DDS-matched it
+            self.preloaded = False
+            self.spin_for(0.3)              # the instance sees the snapshot for 0.3 s before it is activated
+        else:
+            self.spin_for(0.2)
+            self.load_fresh_controller()
+            self.spin_for(0.2)
         self.check_streams()
         self.activated = True           # set first: if the call times out we still deactivate
         if not self.switch(activate=[CONTROLLER]):
@@ -733,7 +774,11 @@ def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument('--arm', required=True, choices=['left', 'right'])
     p.add_argument('--still-tol', type=float, default=0.03)
-    p.add_argument('--still-time', type=float, default=1.0,
+    p.add_argument('--standby', action='store_true',
+                   help='pre-warm and wait in state ARMED until "go:<token>" arrives on /demo/gate_go')
+    p.add_argument('--go-token', default='', help='token the GO message must carry (supervisor sets one per START)')
+    p.add_argument('--standby-timeout', type=float, default=20.0, help='leave standby (exit 0) after this long')
+    p.add_argument('--still-time', type=float, default=0.5,
                    help='GELLO must be still this long before the snapshot (avoids snapshots mid-lift)')
     p.add_argument('--max-start-diff', type=float, default=math.inf,
                    help='optional extra limit on |gello - robot| per joint (default: off)')
@@ -774,6 +819,8 @@ def parse_args(argv):
     p.add_argument('--target-hold', type=float, default=1.0,
                    help='target mode: hold at the target this long before deactivating')
     a = p.parse_args(argv)
+    if a.standby and not a.go_token:
+        p.error('--standby needs --go-token')
     if a.other_arm and a.live_hz <= 0:
         p.error('--other-arm (collision guard) needs the smoothed relay: --live-hz > 0')
     if a.target_joints is not None and len(a.target_joints) != 7:

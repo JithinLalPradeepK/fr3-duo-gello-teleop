@@ -29,6 +29,9 @@ show a demo ERROR state (F5/F6/F7 = pedal START/STOP/HOME, F10 = drop a camera).
 | topic | `/demo/status` | `std_msgs/String` (JSON, latched) | Full demo state (see `status_dict()` in `demo_supervisor.py`) |
 | topic | `/demo/desk/status` | `std_msgs/String` (JSON, latched) | Desk state per arm |
 | topic | `/demo/pedal/status` | `std_msgs/String` (JSON, 1 Hz) | Pedal heartbeat |
+| topic | `/demo/pedal/hold` | `std_msgs/String` (JSON, ~10 Hz while a pedal is held) | `{"pedal": "start"\|"home"\|null, "progress": 0..1, "hold_s": 3.0, "fired": bool}` - START / HOME fire after a 3 s hold; **GUI TODO: show a progress ring/bar while `pedal` is not null** (null = released or cancelled). STOP is immediate and never appears here |
+| status field | `/demo/status` -> `arming` | `"start"` / `"home"` / `null` | the gates are pre-warmed because the pedal is being held (state is still IDLE) |
+| status text | gate states in `/demo/status` -> `arms.<arm>.gate` | string | new states: `ARMED` (standby), `BARRIER` (waiting for the other arm / collision check), `LIVE: limited by the collision guard (...)`, `RESYNC` |
 | topic | `/zed/zed_node/rgb/color/rect/image/compressed`, `/camera/d405_1/color/image_raw/compressed`, `/camera/d405_2/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | Camera streams (JPEG, decode with `QImage.fromData`) |
 
 ## Rules

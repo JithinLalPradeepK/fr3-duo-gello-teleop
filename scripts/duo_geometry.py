@@ -131,18 +131,26 @@ class DuoGeometry:
     def clearance(self, q_left, q_right):
         return self.clearance_between(self.world_capsules('left', q_left), self.world_capsules('right', q_right))
 
-    def path_collision(self, ql0, ql1, qr0, qr1, n=10, tol=0.005):
+    def path_collision(self, ql0, ql1, qr0, qr1, n=10, tol=0.005, end_ok=False, touch=0.005):
         """Both arms move on straight joint-space lines (the controller's start ramp) at UNKNOWN relative speed:
         check every pair of path fractions on an n x n grid. A pose that is already inside the margin at the start
         (e.g. the home pose, wrists a few cm apart) is allowed as long as the path never gets worse than the start
-        by more than tol. Returns None if the path is acceptable, else
+        by more than tol. end_ok=True (HOME: the target is a deliberately chosen pose) additionally allows an end pose
+        inside the margin - but its capsules must not touch (surface distance > touch) and no pose on the way may be
+        worse than the worse of start and end. Returns None if the path is acceptable, else
         (clearance, info, fraction_left, fraction_right) of the worst pair."""
         ql0, ql1, qr0, qr1 = (np.asarray(x, float) for x in (ql0, ql1, qr0, qr1))
         fs = np.linspace(0.0, 1.0, n + 1)
         capl = [self.world_capsules('left', ql0 + f * (ql1 - ql0)) for f in fs]
         capr = [self.world_capsules('right', qr0 + f * (qr1 - qr0)) for f in fs]
         c0, _ = self.clearance_between(capl[0], capr[0])
-        floor = min(0.0, c0) - tol
+        c1, info1 = self.clearance_between(capl[-1], capr[-1])
+        if end_ok:
+            if info1[2] <= touch:                      # the target pose itself would touch the other arm
+                return (c1, info1, 1.0, 1.0)
+            floor = min(0.0, c0, c1) - tol
+        else:
+            floor = min(0.0, c0) - tol
         worst = None
         for a, fl in enumerate(fs):
             for b, fr_ in enumerate(fs):

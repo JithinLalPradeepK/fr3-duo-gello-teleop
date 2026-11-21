@@ -14,6 +14,11 @@ Services (std_srvs/Trigger, answer at once: accepted / refused + reason; progres
   /demo/gripper/{left,right}/{open,close}                (GUI, refused during teleop)
 Status: /demo/status std_msgs/String (JSON), 2 Hz + on change, transient local.
 
+Pedal long press (decision 2026-11-21): demo_pedal.py fires START / HOME only after a 3 s hold and publishes the hold
+progress on /demo/pedal/hold. While START or HOME is being held the supervisor PRE-WARMS both gates (--standby: start-up,
+discovery, a fresh inactive controller instance; nothing moves, nothing is relayed) and sends "go:<token>" on
+/demo/gate_go when the START / HOME service arrives - or kills them when the pedal is released early. Status field
+"arming": "start"|"home"|null. Saves ~2.5 s between pedal and LIVE; the GUI buttons use the normal (slower) path.
 Cameras are not safety relevant: if the camera launch stops, the status shows cameras "stopped" and the
 arms stay usable (no ERROR). Restart them with SHUTDOWN + BRINGUP when convenient.
 Process model: everything (bringup launches, gates) is started from the MAIN thread with
@@ -179,6 +184,8 @@ class Supervisor(Node):
         self.state, self.message, self.since = 'OFFLINE', 'not brought up', time.time()
         self.last_event = ''
         self.error = None                      # plain-words reason while in ERROR
+        self.prewarm = None                    # standby gates running: dict(mode, token, t) (state stays IDLE)
+        self.prewarm_queued = False
         self.arms_crash_reported = False       # arm stack (ros2_control_node) ended unexpectedly
         self.auto_recover_until = 0.0          # after an arm restart: run Franka error recovery once if REFLEX
         self.bringup = {}                      # name -> Proc
@@ -224,6 +231,8 @@ class Supervisor(Node):
             self.create_subscription(CompressedImage, topic, lambda m, k=key: self.on_cam(k),
                                      qos_profile_sensor_data, raw=True)     # fps only: no decoding
         self.create_subscription(String, '/demo/pedal/status', self.on_pedal, 10)
+        self.create_subscription(String, '/demo/pedal/hold', self.on_hold, 10)
+        self.pub_go = self.create_publisher(String, '/demo/gate_go', latched)
         self.desk, self.desk_t = {}, 0.0                 # desk_agent status (FCI / brakes / mode per arm)
         self.create_subscription(String, '/demo/desk/status', self.on_desk, latched)
         self.list_cli = {arm: self.create_client(ListControllers, f'/{arm}/controller_manager/list_controllers',
@@ -297,6 +306,21 @@ class Supervisor(Node):
 
     def on_pedal(self, _m):
         self.pedal_t = time.monotonic()
+
+    def on_hold(self, m):
+        """Pedal hold progress: pre-warm the gates while START / HOME is held, cancel if released early."""
+        try:
+            h = json.loads(m.data)
+        except ValueError:
+            return
+        pedal = h.get('pedal')
+        with self.lock:
+            if pedal in ('start', 'home') and not h.get('fired'):
+                if self.state == 'IDLE' and not self.gates and not self.prewarm_queued:
+                    self.prewarm_queued = True
+                    self.cmdq.put(f'prewarm_{pedal}')
+            elif pedal is None and (self.prewarm or self.prewarm_queued):
+                self.cmdq.put('prewarm_cancel')
 
     def on_desk(self, m):
         try:
@@ -571,6 +595,7 @@ class Supervisor(Node):
                 p.p.kill()
         self.gates.clear()
         self.gate_mode = None
+        self.prewarm = None
 
     def stop_gates(self, sig=signal.SIGINT):
         for p in self.gates.values():
@@ -599,8 +624,12 @@ class Supervisor(Node):
                     if p.alive():
                         p.p.kill()
 
-    def start_gates(self, mode):
+    def start_gates(self, mode, standby=False):
         self.gate_mode = mode
+        token = ''
+        if standby:
+            token = f'{int(time.time() * 1000) % 10 ** 9}'
+            self.prewarm = {'mode': mode, 'token': token, 't': time.monotonic()}
         with self.lock:
             self.gate_state = {arm: '' for arm in ARMS}
         for arm in ARMS:
@@ -608,6 +637,8 @@ class Supervisor(Node):
             cmd = [sys.executable, GATE, '--arm', arm, '--wait-timeout', str(self.a.start_timeout)]
             if self.a.guard:                  # duo collision guard: both gates check the arms against each other
                 cmd += ['--other-arm', 'right' if arm == 'left' else 'left']
+            if standby:
+                cmd += ['--standby', '--go-token', token]
             cmd += self.a.gate_args.split()
             if mode == 'home':
                 # '=' form: a pose starting with a negative value must not be parsed as an option
@@ -645,7 +676,16 @@ class Supervisor(Node):
         self.error = None
         self.set_state('IDLE', 'recovered')
 
+    def cancel_prewarm(self, why):
+        if self.prewarm:
+            self.event(f'standby gates cancelled ({why})')
+            self.end_gates()
+        self.prewarm = None
+        self.prewarm_queued = False
+
     def handle_cmd(self, cmd):
+        if cmd.startswith('prewarm_'):
+            return self.handle_prewarm(cmd[len('prewarm_'):])
         self.event(f'command: {cmd}')
         if cmd == 'stop':
             if self.gates:
@@ -668,12 +708,33 @@ class Supervisor(Node):
         with self.lock:                                     # state may have changed since accepted
             if self.state != 'IDLE':
                 return self.event(f'{cmd} dropped: state changed to {self.state}')
+        mode = 'teleop' if cmd == 'start' else 'home'
+        if self.prewarm and (self.prewarm['mode'] != mode or not all(p.alive() for p in self.gates.values())):
+            self.cancel_prewarm('wrong mode or a gate died')
+        if self.prewarm:                                   # long press complete: GO for the waiting gates
+            self.pub_go.publish(String(data=f'go:{self.prewarm["token"]}'))
+            self.event(f'GO to the standby gates after {time.monotonic() - self.prewarm["t"]:.1f} s')
+            self.prewarm = None
+            self.prewarm_queued = False
+        else:
+            self.start_gates(mode)
         if cmd == 'start':
-            self.start_gates('teleop')
             self.set_state('TELEOP_STARTING', 'take the GELLOs out of their holders and hold them still')
-        elif cmd == 'home':
-            self.start_gates('home')
+        else:
             self.set_state('HOMING', 'both arms ramping to the home pose')
+
+    def handle_prewarm(self, what):
+        """what: 'start' | 'home' | 'cancel' (main thread)."""
+        if what == 'cancel':
+            return self.cancel_prewarm('pedal released before the hold was complete')
+        self.prewarm_queued = False
+        mode = 'teleop' if what == 'start' else 'home'
+        with self.lock:
+            ok = self.state == 'IDLE' and not self.gates and not self.robot_not_ready() \
+                and (mode == 'teleop' or all(self.home[arm] for arm in ARMS))
+        if ok:
+            self.event(f'pedal held: standby gates for {what.upper()}')
+            self.start_gates(mode, standby=True)
 
     # ------------------------------------------------------------------ monitoring (main thread)
     def monitor(self):
@@ -725,6 +786,9 @@ class Supervisor(Node):
                     words = f'{arm}: {r["mode"]}' + (f' ({", ".join(r["errors"])})' if r['errors'] else '')
                     self.error = words + ' - release E-stop / clear, then press ERROR RECOVERY'
                     return self.set_state('ERROR', self.error)
+        # standby gates that never got their GO (pedal released, supervisor missed it): do not leave them around
+        if self.prewarm and s == 'IDLE' and time.monotonic() - self.prewarm['t'] > 15.0:
+            self.cancel_prewarm('no GO within 15 s')
         # gates
         if self.gates:
             ended = {arm: p.rc() for arm, p in self.gates.items() if not p.alive()}
@@ -759,6 +823,7 @@ class Supervisor(Node):
                            for a, c in codes.items())
         self.gates.clear()
         self.gate_mode = None
+        self.prewarm = None
         if not self.arms_crash_reported and self.arm_crash_cause():
             self.report_arm_crash()                   # gate saw the dead controller manager first
         if any(c == 4 for c in codes.values()) and not self.arms_crash_reported:
@@ -794,6 +859,7 @@ class Supervisor(Node):
                     'arms': arms, 'cameras': {k: round(v['fps'], 1) for k, v in self.cam.items()},
                     'cameras_launch': 'off' if cam is None else ('running' if cam.alive() else 'stopped'),
                     'pedal': 'connected' if now - self.pedal_t < 3.0 else 'not connected',
+                    'arming': ({'teleop': 'start', 'home': 'home'}[self.prewarm['mode']] if self.prewarm else None),
                     'last_event': self.last_event, 'sim': self.a.sim, 'logdir': self.logdir}
 
     def publish_status(self):

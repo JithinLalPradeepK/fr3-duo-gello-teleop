@@ -316,6 +316,96 @@ def main():
     R.check(sc, 'BRINGUP accepted', ok is True, msg)
     R.check(sc, 'IDLE again', c.wait_state('IDLE', 90), c.state()[1])
 
+    # ---- pedal long press: pre-warmed (standby) gates, GO, cancel ----------------------------------------------
+    pub_hold = node.create_publisher(String, '/demo/pedal/hold', 10)
+
+    def hold(pedal, seconds, progress_end=0.9):
+        """Publish /demo/pedal/hold at 10 Hz like demo_pedal.py does while a pedal is held."""
+        n = int(seconds * 10)
+        for k in range(n):
+            pub_hold.publish(String(data=json.dumps({'pedal': pedal, 'progress': round(progress_end * k / max(n, 1), 2),
+                                                     'hold_s': 3.0, 'fired': False})))
+            time.sleep(0.1)
+
+    def release():
+        pub_hold.publish(String(data=json.dumps({'pedal': None, 'progress': 0.0, 'hold_s': 3.0, 'fired': False})))
+
+    def arming():
+        return c.status.get('arms', {}), c.status.get('arming')
+
+    sc = 'T6d START pedal held -> standby gates -> START (GO) -> fast TELEOP'
+    print(f'\n== {sc}', flush=True)
+    gello(MOCK_BASE, MOCK_BASE)                       # GELLOs out of their holders and still
+    time.sleep(1.5)
+    hold('start', 2.0)
+    R.check(sc, 'status says arming: start', c.status.get('arming') == 'start', str(c.status.get('arming')))
+    R.check(sc, 'state stays IDLE (nothing is starting yet)', c.state()[0] == 'IDLE', str(c.state()))
+    end = time.monotonic() + 15
+    while time.monotonic() < end and not all(c.status.get('arms', {}).get(a_, {}).get('gate', '').startswith('ARMED')
+                                             for a_ in ('left', 'right')):
+        hold('start', 0.5)
+    R.check(sc, 'both gates ARMED', all(c.status.get('arms', {}).get(a_, {}).get('gate', '').startswith('ARMED')
+                                        for a_ in ('left', 'right')),
+            str({a_: c.status.get('arms', {}).get(a_, {}).get('gate') for a_ in ('left', 'right')}))
+    R.check(sc, 'robots untouched while armed: controllers inactive', ctrl('left') == ctrl('right') == 'inactive')
+    t0 = time.monotonic()
+    ok, msg = c.call('start')
+    R.check(sc, 'START accepted', ok is True, msg)
+    reached = c.wait_state('TELEOP', 20)
+    dt = time.monotonic() - t0
+    R.check(sc, 'TELEOP', reached, c.state()[1])
+    R.check(sc, 'START (after the long press) -> TELEOP in < 3 s', reached and dt < 3.0, f'{dt:.2f} s')
+    R.check(sc, 'arming cleared', c.status.get('arming') is None, str(c.status.get('arming')))
+    R.check(sc, 'controllers active', ctrl('left') == ctrl('right') == 'active')
+    c.call('stop')
+    R.check(sc, 'STOP -> IDLE', c.wait_state('IDLE', 20), c.state()[1])
+    R.check(sc, 'controllers inactive', ctrl('left') == ctrl('right') == 'inactive')
+
+    sc = 'T6e pedal released early -> standby gates are cancelled, nothing moved'
+    print(f'\n== {sc}', flush=True)
+    time.sleep(1.0)
+    hold('start', 2.5)
+    R.check(sc, 'gates running while held', running(GATE_PATTERN) and c.status.get('arming') == 'start')
+    release()
+    end = time.monotonic() + 8
+    while time.monotonic() < end and running(GATE_PATTERN):
+        time.sleep(0.2)
+    R.check(sc, 'gates gone after the release', not running(GATE_PATTERN))
+    time.sleep(1.0)
+    R.check(sc, 'IDLE, arming cleared, message not an error', c.state()[0] == 'IDLE' and c.status.get('arming') is None,
+            str((c.state(), c.status.get('arming'))))
+    R.check(sc, 'controllers inactive', ctrl('left') == ctrl('right') == 'inactive')
+    hold('start', 1.0)
+    R.check(sc, 'a new hold afterwards pre-warms again', c.status.get('arming') == 'start' or running(GATE_PATTERN))
+    release()
+    end = time.monotonic() + 8
+    while time.monotonic() < end and running(GATE_PATTERN):
+        time.sleep(0.2)
+    R.check(sc, 'and cancels again', not running(GATE_PATTERN))
+
+    sc = 'T6f HOME pedal held -> standby -> HOME (GO) -> IDLE at home'
+    print(f'\n== {sc}', flush=True)
+    gello(SIM_HOLDER, SIM_HOLDER)
+    time.sleep(1.0)
+    hold('home', 2.0)
+    R.check(sc, 'status says arming: home', c.status.get('arming') == 'home', str(c.status.get('arming')))
+    ok, msg = c.call('home')
+    R.check(sc, 'HOME accepted', ok is True, msg)
+    R.check(sc, 'HOMING', c.wait_state('HOMING', 10), c.state()[1])
+    R.check(sc, 'back to IDLE: both arms at home', c.wait_state('IDLE', 60) and 'both arms at home' in c.state()[1],
+            c.state()[1])
+
+    sc = 'T6g wrong command after a pre-warm (START held, then HOME) -> standby cancelled, HOME runs normally'
+    print(f'\n== {sc}', flush=True)
+    time.sleep(1.0)
+    hold('start', 2.0)
+    R.check(sc, 'pre-warmed for START', c.status.get('arming') == 'start')
+    ok, msg = c.call('home')
+    R.check(sc, 'HOME accepted', ok is True, msg)
+    R.check(sc, 'HOMING then IDLE at home', c.wait_state('HOMING', 20) and c.wait_state('IDLE', 60)
+            and 'both arms at home' in c.state()[1], c.state()[1])
+    R.check(sc, 'no gate left, controllers inactive', not running(GATE_PATTERN) and ctrl('left') == ctrl('right') == 'inactive')
+
     sc = 'T7 supervisor killed (SIGKILL) during TELEOP'
     print(f'\n== {sc}', flush=True)
     gello(MOCK_BASE, MOCK_BASE)

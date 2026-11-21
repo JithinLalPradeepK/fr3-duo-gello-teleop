@@ -26,7 +26,8 @@ and a PyQt5 GUI on two monitors. It runs as one ROS 2 Humble system on one Ubunt
 - Commands: **START** (gated teleop, both arms), **STOP** (deactivate controllers, robots hold
   pose; never refused), **HOME** (both arms to the saved home pose; only when stopped),
   **BRINGUP / SHUTDOWN**, **RECOVER**.
-- Pedals: 1 = START, 2 = STOP, 3 = HOME.
+- Pedals: 1 = START, 2 = STOP, 3 = HOME. **START and HOME need a 3 s long press** (releasing earlier cancels);
+  STOP is immediate. While a pedal is held, the gates are pre-warmed so LIVE follows quickly after the press.
 
 Details: [docs/supervisor_design.md](docs/supervisor_design.md).
 
@@ -122,11 +123,32 @@ data arrives later, the robot jumps to the GELLO pose at full stiffness. `gello_
    This avoids torque steps in the impedance controller.
 6. On STOP, a failure or a signal, the gate deactivates the controller and the robot holds its pose.
 
+## Duo collision guard
+
+Both arms sit on the Franka FR3 Duo mount, so each gate knows where the other arm is (kinematics and mount poses from
+`franka_description`, collision capsules fitted to the FR3 collision meshes: `scripts/duo_geometry.py`,
+`config/duo_geometry.yaml`, margins in `config/duo_guard.yaml`: links 4 cm, gripper-to-gripper 1 cm so two-handed tasks
+stay possible).
+- **Before any motion** (START, HOME, RESYNC) both gates wait at a BARRIER until both goals are known, then check the
+  straight joint-space ramps of both arms against each other. A path that would bring the arms closer than the margin is
+  REFUSED with the links named. A pose that is already inside the margin (the home pose) stays allowed as long as the
+  motion does not make it worse.
+- **In LIVE** every command step that would reduce the clearance below the margin is shortened or held (worst case over the
+  commanded and the actual poses of both arms): the status reads `LIVE: limited by the collision guard (...)`. Moving
+  away is never limited.
+- Robot namespaces map to mount slots in `config/duo_guard.yaml` (`slots`): our `left` (IP .51) sits in the mount's
+  **right** slot (verified with the saved home poses).
+- `scripts/make_mirrored_home.py` makes the two home poses exact mirror images; `demo_supervisor.py --no-guard` switches
+  the guard off (diagnostics only).
+
 ## Tests (simulation, no robot needed)
 
 ```bash
 test/sim_gate_test.sh all          # start gate against fake hardware
-test/sim_supervisor_test.sh        # supervisor state machine
+test/sim_supervisor_test.sh        # supervisor state machine (incl. pedal hold / standby gates)
+test/sim_gui_test.sh               # GUI + supervisor end to end (offscreen)
+python3 test/geometry_test.py      # Duo kinematics, capsule distances, path check (numpy only)
+python3 test/pedal_logic_test.py   # pedal long-press logic (simulated time)
 ```
 
 ## Working on the GUI without robots
