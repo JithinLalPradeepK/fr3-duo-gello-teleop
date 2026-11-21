@@ -405,4 +405,8 @@ same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_to
   not visible until STATUS is opened (the second screen shows it). Offered to the user: auto-open the status on ERROR.
 - Tests adapted: test/gui_camera_test.py (C-3 pages, new C-4 "no Home page", 36 checks, PASS), test/sim_gui_test.py (G1-G6 expectations).
   GUI end-to-end simulation (test/sim_gui_test.sh) NOT YET RUN for this change: a real demo (arms + grippers) was running.
+- GITHUB (2026-11-21 19:40): PR #1 (fix/s2-s6-recorder-supervisor -> main) MERGED into main (merge commit cf049a0) by the owner with the
+  required-review rule overridden at the owner's explicit request (gh pr merge --admin; no reviewer approved). Includes the Home-page
+  removal. Sim before the merge: gate 186/186 + 15/15, supervisor 124/124, GUI e2e 35/35, geometry/pedal/depth/gui-camera unit tests.
+  Work from now on: new branch from main + PR (main is protected).
 
