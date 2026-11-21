@@ -356,3 +356,15 @@ same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_to
   as a fallback). Lesson: sim_gate_driver Arm.state_time() takes arm.lock - never call it inside "with arm.lock:" (deadlock
   froze the fake GELLO publisher once). HARDWARE TEST OF THE NEW BEHAVIOUR STILL OPEN.
 
+## HARDWARE TEST 2026-11-21 17:07-17:22 (new pedals) + FIXES (sim 17:55: gate 186/186 + 15/15, supervisor 124/124)
+- Worked: pedal 3 as KEY_C hold (5.71 s -> RESET), START -> TELEOP 2.0-3.0 s after the hold for 0.3-0.8 rad ramps, pedal 2
+  stop + HOME after 1 s, second press aborts HOME, RESET after a real reflex (restart arms, HOME in 2 phases left-then-right
+  because the direct paths collided: replayed recorded poses, direct worst -4.3 cm link6/link7; other homings both at once;
+  total 14 s, "reset complete - ready").
+- FIXED: (1) 18 s HOLD wait (offset 0.6-1.0 rad > catch-up limit): --catchup-max 1.5, --catchup-vel 0.8. (2) FAULT "GELLO
+  jumped 3 times in a row" at 17:22:04 = jump guard measured against the last ACCEPTED sample, so a fast smooth flick (0.44,
+  0.57 rad away) counted as 3 jumps: now measured sample to sample (S26 reproduces the quick-onset flick; S7 flip-flop garbage
+  still faults). (3) Supervisor logs "HOME plan: n phase(s): ..." (events/supervisor.log).
+- NOT bugs: right-arm cartesian_reflex 17:12:51 (arms pressed on each other, 15-19 N for 40 s, guard off in teleop by user
+  decision); right REFLEX at bring-up 17:07:28 = leftover of the earlier reflex (RESET clears it).
+

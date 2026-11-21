@@ -814,6 +814,10 @@ class Supervisor(Node):
             plan, why = self.make_home_plan()
             if plan is None:
                 return self.set_state('IDLE', f'HOME refused: {why}')
+        names = ['both arms' if all(x is not None for x in ph) else ('left arm' if ph[0] is not None else 'right arm')
+                 for ph in plan]
+        self.event(f'HOME plan: {len(plan)} phase(s): {" then ".join(names)}'
+                   + ('' if len(plan) == 1 else ' (the direct paths of both arms would collide)'))
         self.home_phase_total, self.home_phase_no = len(plan), 0
         self.home_phases = list(plan)
         self.next_home_phase()

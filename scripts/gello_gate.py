@@ -28,8 +28,8 @@ States:
   MOVING      controller ramps to snapshot (speed factor 0.2); at least min_moving_time;
               FAULT after move_timeout
   HOLD        robot within converge_tol of snapshot. Live GELLO within live_tol -> LIVE. Within catchup_max (default
-              0.6 rad: the operator started moving while the robot was still ramping) -> LIVE at once with a
-              CATCH-UP: the smoothed command leaves the snapshot towards the live GELLO at catchup_vel (0.5 rad/s)
+              1.5 rad: the operator started moving while the robot was still ramping) -> LIVE at once with a
+              CATCH-UP: the smoothed command leaves the snapshot towards the live GELLO at catchup_vel (0.8 rad/s)
               until it is within 0.03 rad ("LIVE: catching up with the GELLO"), then normal speed. Further away: wait
               here; RESYNC: if the GELLO is held still out of its holder for resync_time, deactivate (robot holds),
               take the new GELLO pose as snapshot and ramp again (fresh instance).
@@ -41,7 +41,7 @@ States:
               URDF limits and where that speed limit reaches zero) and at live_j4_min for j4 (self-collision zone,
               default -2.70). The clamp acts on the desired value, so a snapshot outside it is pulled in at
               the capped speed. --live-hz 0 = old raw relay (no clamp).
-              Jump guard: sample-to-sample steps > jump_tol not used, 3 in a row = FAULT
+              Jump guard: a step > jump_tol between two consecutive GELLO samples is not used, 3 in a row = FAULT
 TARGET MODE (HOME): --target-joints q1,..,q7 - no GELLO, no holder check, no LIVE: the same fresh-instance +
   snapshot-relay + ramp path drives the arm to the given pose; once converged it holds for target_hold s,
   deactivates (robot holds) and exits 0 with state DONE.
@@ -382,13 +382,16 @@ class GelloGate(Node):
         while self.gello_hist and now - self.gello_hist[0][0] > self.a.still_time + 0.2:
             self.gello_hist.popleft()
         if self.state == 'LIVE' and self.activated and not self.stopping:
+            # Sample-to-sample step (NOT versus the last accepted sample: a fast but smooth flick drifts away from it
+            # and was counted as 3 jumps in a row, 2026-11-21). 0.3 rad in 40 ms = 7.5 rad/s: not a human, a glitch.
+            # The smoother caps the command speed anyway, so a glitch that stays is simply followed at that speed.
             step = maxabs(q, self.last_sample) if self.last_sample else 0.0
+            self.last_sample = q
             if step > self.a.jump_tol:
                 self.jumps += 1
-                self.get_logger().warn(f'GELLO jump {step:.3f} rad not relayed ({self.jumps}/3)')
+                self.get_logger().warn(f'GELLO jump {step:.3f} rad between two samples not relayed ({self.jumps}/3)')
                 return
             self.jumps = 0
-            self.last_sample = q
             if self.smoother is not None:
                 self.smoother.sample(q, now)     # published by relay_tick at live_hz
             else:
@@ -826,9 +829,9 @@ def parse_args(argv):
     p.add_argument('--live-j4-min', type=float, default=-2.70,
                    help='LIVE: soft lower limit for j4 [rad]. The left arm hit self_collision_avoidance_violation '
                         'at j4 -2.83 (2026-11-21), before the usable range ends at -2.937 (use -9 to disable)')
-    p.add_argument('--catchup-max', type=float, default=0.6,
+    p.add_argument('--catchup-max', type=float, default=1.5,
                    help='HOLD: GELLO this far (rad) from the snapshot still goes LIVE, with a slow catch-up')
-    p.add_argument('--catchup-vel', type=float, default=0.5,
+    p.add_argument('--catchup-vel', type=float, default=0.8,
                    help='catch-up speed cap [rad/s] until the command is within 0.03 rad of the GELLO')
     p.add_argument('--live-vel-frac', type=float, default=0.5,
                    help='LIVE: command uses at most this share of the FR3 position-dependent speed limit')
