@@ -13,7 +13,7 @@ Redesign (branch features/GUI-development, see docs/GUI_CHANGES.md):
   HOME      white page, robot image + one line, NO buttons. Foot pedals drive everything.
   LIVE      camera page (opens by itself on START): ZED Mini overview in the centre, left wrist bottom-left,
             right wrist bottom-right; DEPTH as picture-in-picture inset on every camera (click the inset to swap);
-            main view RGB / DEPTH + PiP switch top right; status panel slides in / out on the left.
+            main view RGB / DEPTH + PiP switch top right; status panel slides in / out (free space, top-left).
   OPERATOR  navbar menu > Operator panel: ALL sections at once in a grid (Testing stage, Fix errors, Robot setup,
             Status, System, Log) = all of Jithin's old buttons.
   NAVBAR    logo (black/white with the mode), LEFT / RIGHT arm chips, CAMERAS chip (click = the 3 cameras),
@@ -921,7 +921,7 @@ class LivePage(QWidget):
         super().__init__()
         self.hub = hub
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(48, 16, 48, 28)
+        outer.setContentsMargins(40, 16, 40, 24)
         outer.setSpacing(14)
         top = QHBoxLayout()
         top.setSpacing(10)
@@ -972,31 +972,47 @@ class LivePage(QWidget):
         sv.addStretch(1)
 
         self.tiles = {key: CameraTile(title, key, hub) for title, key, _, _ in CAMERAS}
-        grid = self.grid = QGridLayout()
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(14)
-        grid.addWidget(self.panel, 0, 0)                                          # free space, top left
-        grid.addWidget(self.tiles['zed'], 0, 1, 2, 1, Qt.AlignVCenter)            # centre
-        grid.addWidget(self.tiles['d405_1'], 1, 0, Qt.AlignBottom)                # left wrist, bottom left
-        grid.addWidget(self.tiles['d405_2'], 1, 2, Qt.AlignBottom)                # right wrist, bottom right
-        for col, wgt in enumerate(self.COLS):
-            grid.setColumnStretch(col, wgt)
-        grid.setRowStretch(0, 1)
-        grid.setRowStretch(1, 0)
-        outer.addLayout(grid, 1)
+        # top row: status panel (free space, left) | ZED Mini overview (centre) | spacer
+        # bottom row: left wrist (bottom-left) ........ right wrist (bottom-right)
+        self.top_row = QHBoxLayout()
+        self.top_row.setSpacing(18)
+        self.right_gap = QWidget()
+        self.right_gap.setObjectName('plain')
+        self.top_row.addWidget(self.panel)
+        self.top_row.addWidget(self.tiles['zed'], 0, Qt.AlignTop)
+        self.top_row.addWidget(self.right_gap)
+        outer.addLayout(self.top_row, 1)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.tiles['d405_1'], 0, Qt.AlignBottom)
+        bottom.addStretch(1)
+        bottom.addWidget(self.tiles['d405_2'], 0, Qt.AlignBottom)
+        outer.addLayout(bottom, 0)
         self.toggle_status(True)
 
-    COLS = (2, 5, 2)                      # column weights: left wrist | ZED overview | right wrist
+    WRIST_RATIO = 0.62                    # wrist camera width relative to the ZED overview
 
     def fit_tiles(self):
-        """Give every camera tile the height of a 16:9 picture for its column width."""
-        g = self.grid
-        avail = self.width() - 96 - 2 * g.horizontalSpacing()
-        if avail <= 0:
+        """Size the three 16:9 tiles to use the whole page: ZED centre top, wrists large in the bottom corners.
+        ZED row + wrist row fill the height under the toolbar; the side panel keeps >= 230 px."""
+        m = self.layout().contentsMargins()
+        avail_w = self.width() - m.left() - m.right()
+        toolbar_h = max(self.b_status.height(), 34)
+        avail_h = self.height() - m.top() - m.bottom() - toolbar_h - 2 * self.layout().spacing()
+        if avail_w <= 0 or avail_h <= 200:
             return
-        for key, col in (('d405_1', 0), ('zed', 1), ('d405_2', 2)):
-            w = avail * self.COLS[col] / sum(self.COLS)
-            self.tiles[key].setFixedHeight(self.tiles[key].height_for(int(w)))
+        hdr = self.tiles['zed'].height_for(0)                           # title row only
+        r = self.WRIST_RATIO
+        zw = (avail_h - 2 * hdr) * 16 / 9 / (1 + r)
+        zw = min(zw, avail_w - 2 * (230 + 18))
+        zw = max(zw, 320)
+        ww = zw * r
+        side = max(0, int((avail_w - zw) / 2 - 18))
+        for key, w in (('zed', zw), ('d405_1', ww), ('d405_2', ww)):
+            t = self.tiles[key]
+            t.setFixedWidth(int(w))
+            t.setFixedHeight(t.height_for(int(w)))
+        self.panel.setFixedWidth(side)
+        self.right_gap.setFixedWidth(side)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
