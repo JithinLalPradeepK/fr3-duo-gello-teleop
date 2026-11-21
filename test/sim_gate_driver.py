@@ -414,19 +414,39 @@ def run_single(a, logdir):
     R.check(sc, 'controller inactive', arm.ctrl_state() == 'inactive')
     check_ramp(a, R, sc, n_goal, first_relayed(arm))
 
-    # ---- S9: snapshot outside FR3 joint limits (j4 -3.056 < -3.077 + 0.1) -> REFUSED
-    sc = 'S9 joint limit'
+    # ---- S9: GELLO near an FR3 joint limit -> gate keeps waiting with a hint, REFUSED only at wait timeout
+    sc = 'S9 joint limit (waits, then REFUSED at timeout)'
     print(f'\n== {sc}', flush=True)
     arm.reset_records()
     arm.set_gello(lambda t: offset(5, -1.1))     # j6 0.471 < 0.4398 + 0.1, far from holder
-    p = start_gate(a.arm, logdir, 'S9')
+    p = start_gate(a.arm, logdir, 'S9', ['--wait-timeout', '4'])
     rc = wait_exit(p, 15)
     with arm.lock:
         texts = [t for _, t in arm.states]
     R.check(sc, 'gate exit code 2 (REFUSED)', rc == 2, f'rc={rc}')
-    R.check(sc, 'reason: joint limits', any('joint limits' in t for t in texts), texts[-1] if texts else '')
+    R.check(sc, 'hint: move GELLO j6 away from its joint limit',
+            any('move GELLO j6 away from its joint limit' in t for t in texts), str(texts[-3:]))
+    R.check(sc, 'reason: stayed near the joint limit', any('near the joint limit of j6' in t for t in texts),
+            texts[-1] if texts else '')
     R.check(sc, 'controller inactive, nothing relayed',
             arm.ctrl_state() == 'inactive' and len(arm.relayed) == 0)
+
+    # ---- S9b: near the limit for 2.5 s, then moved away -> START continues (no new START needed)
+    sc = 'S9b joint limit, then moved away -> LIVE'
+    print(f'\n== {sc}', flush=True)
+    arm.reset_records()
+    arm.set_gello(lambda t: offset(5, -1.1) if t < 2.5 else base)
+    n_goal = len(q_goal_lines(a.cm_log))
+    p = start_gate(a.arm, logdir, 'S9b', ['--wait-timeout', '15'])
+    ok = arm.wait_state('LIVE', 20)
+    R.check(sc, 'reaches LIVE', ok, ' -> '.join(dict.fromkeys(arm.state_names())))
+    with arm.lock:
+        early = [t for t, _ in arm.relayed if t - arm.t0 < 2.5]
+    R.check(sc, 'nothing relayed while near the limit', not early, f'{len(early)} msgs')
+    p.send_signal(signal.SIGINT)
+    rc = wait_exit(p, 15)
+    R.check(sc, 'gate exit code 0, controller inactive', rc == 0 and arm.ctrl_state() == 'inactive')
+    check_ramp(a, R, sc, n_goal, base)
 
     # ---- S10: far pose (1.2 rad, out of holder, within limits) is now ACCEPTED -> ramp to it
     sc = 'S10 far pose accepted'
@@ -515,6 +535,99 @@ def run_single(a, logdir):
     rc = wait_exit(p, 15)
     R.check(sc, 'gate exit code 0, controller inactive', rc == 0 and arm.ctrl_state() == 'inactive')
     check_ramp(a, R, sc, n_goal, base)
+
+    # ---- S15: LIVE smoothing: 25 Hz GELLO samples -> ~200 Hz command, no big steps, speed capped
+    sc = 'S15 LIVE smoothing + speed cap'
+    print(f'\n== {sc}', flush=True)
+    p, ok = to_live(sc, 'S15')
+    if ok:
+        time.sleep(0.5)
+        n_rel = len(arm.relayed)
+        arm.set_gello(lambda t: offset(0, 0.15 * math.sin(2 * math.pi * t)))   # 1 Hz, peak 0.94 rad/s
+        time.sleep(3)
+        with arm.lock:
+            live = arm.relayed[n_rel:]
+        rate = (len(live) - 1) / (live[-1][0] - live[0][0]) if len(live) > 1 else 0
+        steps = [abs(b[1][0] - a_[1][0]) for a_, b in zip(live, live[1:])]
+        R.check(sc, 'command rate >= 150 Hz (GELLO 25 Hz)', rate >= 150, f'{rate:.0f} Hz')
+        R.check(sc, 'largest command step <= 0.012 rad (raw GELLO ~0.038)', max(steps) <= 0.012,
+                f'max step {max(steps):.4f} rad')
+        amp = max(abs(q[0] - base[0]) for _, q in live)
+        R.check(sc, 'motion still followed (amplitude > 0.12 of 0.15)', amp > 0.12, f'{amp:.3f}')
+        # speed cap: 0.25 rad step (below jump_tol 0.3) -> command ramps at <= 2 rad/s
+        n_rel = len(arm.relayed)
+        arm.set_gello(lambda t: offset(0, 0.25))
+        time.sleep(1.0)
+        with arm.lock:
+            seg = arm.relayed[n_rel:]
+        vel = max((abs(b[1][0] - a_[1][0]) / max(b[0] - a_[0], 1e-3) for a_, b in zip(seg, seg[1:])
+                   if b[0] - a_[0] > 0.003), default=0)
+        t_reach = next((t - seg[0][0] for t, q in seg if abs(q[0] - (base[0] + 0.25)) < 1e-3), None)
+        R.check(sc, '0.25 rad GELLO step: command speed <= 2.4 rad/s (cap 2.0 + timing jitter)',
+                vel <= 2.4, f'max {vel:.2f} rad/s')
+        R.check(sc, '... and reaches the target within 0.4 s', t_reach is not None and t_reach < 0.4,
+                f'{t_reach}')
+    p.send_signal(signal.SIGINT)
+    rc = wait_exit(p, 15)
+    R.check(sc, 'gate exit code 0, controller inactive', rc == 0 and arm.ctrl_state() == 'inactive')
+
+    # ---- S9c: j1 at 2.70 is inside the URDF limits (+-2.90) but where the FR3 speed limit is ~0 (2.743) -> waits
+    sc = 'S9c position-dependent speed limit zone (j1 2.70)'
+    print(f'\n== {sc}', flush=True)
+    arm.reset_records()
+    arm.set_gello(lambda t: offset(0, 2.70))
+    p = start_gate(a.arm, logdir, 'S9c', ['--wait-timeout', '4'])
+    rc = wait_exit(p, 15)
+    with arm.lock:
+        texts = [t for _, t in arm.states]
+    R.check(sc, 'gate exit code 2 (REFUSED), hint names j1', rc == 2 and any('j1 away from its joint limit' in t
+                                                                          for t in texts), f'rc={rc} {texts[-2:]}')
+    R.check(sc, 'controller inactive, nothing relayed', arm.ctrl_state() == 'inactive' and len(arm.relayed) == 0)
+
+    # ---- S17: LIVE command clamped before the j4 zero-speed zone, slowing down on the FR3 speed curve
+    sc = 'S17 LIVE clamp at j4 limit'
+    print(f'\n== {sc}', flush=True)
+    p, ok = to_live(sc, 'S17')
+    if ok:
+        n_rel = len(arm.relayed)
+        arm.set_gello(lambda t: offset(3, -min(0.85, 0.3 * t)))   # GELLO j4 down to -3.206 (past the limit)
+        time.sleep(4.5)
+        with arm.lock:
+            live = arm.relayed[n_rel:]
+        j4 = [q[3] for _, q in live]
+        R.check(sc, 'j4 command never below -2.937 (zero-speed zone -3.037 + 0.1)', min(j4) >= -2.937 - 1e-6,
+                f'min {min(j4):.4f}')
+        R.check(sc, 'j4 command reaches the clamp', min(j4) < -2.93, f'min {min(j4):.4f}')
+        v = [(b[1][3] - a_[1][3]) / (b[0] - a_[0]) for a_, b in zip(live, live[1:]) if b[0] - a_[0] > 0.003]
+        near = [abs(x) for (t, q), x in zip(live[1:], v) if q[3] < -2.90]
+        R.check(sc, 'speed near the clamp <= 50 % of the FR3 limit there (~0.65 rad/s at -2.90 -> <= 0.4)',
+                max(near, default=0) <= 0.4, f'max {max(near, default=0):.3f} rad/s')
+    p.send_signal(signal.SIGINT)
+    rc = wait_exit(p, 15)
+    R.check(sc, 'gate exit code 0, controller inactive', rc == 0 and arm.ctrl_state() == 'inactive')
+
+    # ---- S16: HOLD resync: GELLO moved during the ramp and held still elsewhere -> second ramp to it
+    sc = 'S16 HOLD resync'
+    print(f'\n== {sc}', flush=True)
+    arm.reset_records()
+    arm.set_gello(lambda t: base)
+    n_goal = len(q_goal_lines(a.cm_log))
+    p = start_gate(a.arm, logdir, 'S16', ['--move-timeout', '3'])
+    moving = arm.wait_state('MOVING', 15)
+    moved = offset(0, 0.2)
+    arm.set_gello(lambda t: moved)                   # operator moves the GELLO during the ramp, holds it there
+    R.check(sc, 'HOLD (GELLO off snapshot)', moving and arm.wait_state('HOLD', 10),
+            ' -> '.join(dict.fromkeys(arm.state_names())))
+    R.check(sc, 'RESYNC after GELLO held still', arm.wait_state('RESYNC', 8),
+            ' -> '.join(dict.fromkeys(arm.state_names())))
+    rc = wait_exit(p, 20)                            # mock cannot move -> second ramp times out
+    R.check(sc, 'gate exit 3 (mock cannot reach new pose), controller inactive',
+            rc == 3 and arm.ctrl_state() == 'inactive', f'rc={rc}')
+    time.sleep(1.0)
+    goals = q_goal_lines(a.cm_log)[n_goal:]
+    R.check(sc, 'two controller ramps: snapshot, then the new GELLO pose',
+            len(goals) == 2 and max(abs(x - y) for x, y in zip(goals[0], base)) < 1e-5
+            and max(abs(x - y) for x, y in zip(goals[1], moved)) < 1e-5, str([[round(x, 3) for x in g] for g in goals]))
 
     arm.set_gello(None)
     code = R.summary()

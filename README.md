@@ -101,8 +101,9 @@ The repo is expected at `~/robot_demo`.
 The demo starts **OFFLINE**. In the GUI: **PREPARE ALL** (unlock brakes, Execution mode, FCI on) →
 **BRING UP** → **START** / **STOP** / **HOME**. To finish: **PARK**, then close the GUI.
 
-After a robot reflex or an E-stop the arm stack is gone: release the E-stop, then **SHUTDOWN** and
-**BRING UP**.
+After a robot reflex or an E-stop: release the E-stop, then press **ERROR RECOVERY**. If the arm
+stack crashed, this restarts only the arm stack (controllers inactive, nothing moves). Grippers, GELLO and
+cameras keep running. Otherwise it runs the Franka error recovery.
 
 ## Start gate
 
@@ -115,8 +116,11 @@ data arrives later, the robot jumps to the GELLO pose at full stiffness. `gello_
    takes a snapshot of the pose.
 3. The gate relays the frozen snapshot, then activates a **fresh** controller instance, so the
    robot ramps smoothly to the snapshot.
-4. HOLD until the live GELLO matches the snapshot (< 0.08 rad) → LIVE teleop.
-5. On STOP, a failure or a signal, the gate deactivates the controller and the robot holds its pose.
+4. HOLD until the live GELLO matches the snapshot (< 0.08 rad) → LIVE teleop. If the GELLO is held still
+   somewhere else for 2 s, the robot ramps again to that new pose (RESYNC).
+5. In LIVE the 25 Hz GELLO stream is smoothed: interpolated to 200 Hz, with every joint capped at 2 rad/s.
+   This avoids torque steps in the impedance controller.
+6. On STOP, a failure or a signal, the gate deactivates the controller and the robot holds its pose.
 
 ## Tests (simulation, no robot needed)
 

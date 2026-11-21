@@ -790,7 +790,7 @@ class PreviewFeeder(QObject):
 
     def error(self):
         self.set('ERROR', 'right: motion aborted by robot reflex (cartesian_reflex) - robots stopped by the Franka. '
-                          'Check the robots (release E-stop), then SHUTDOWN and BRINGUP')
+                          'Check the robots (release E-stop), then press ERROR RECOVERY')
 
     def tick(self):
         up = self.state not in ('OFFLINE', 'SHUTTING_DOWN')

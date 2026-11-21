@@ -33,6 +33,26 @@ def running(pattern):
     return subprocess.run(['pgrep', '-f', pattern], stdout=subprocess.DEVNULL).returncode == 0
 
 
+def sim_pids(pattern):
+    """PIDs matching pattern that belong to this sim (ROS_DOMAIN_ID=77) - never a real stack."""
+    pids = []
+    for pid in subprocess.run(['pgrep', '-f', pattern], capture_output=True, text=True).stdout.split():
+        try:
+            with open(f'/proc/{pid}/environ', 'rb') as f:
+                if b'ROS_DOMAIN_ID=77\0' in f.read():
+                    pids.append(int(pid))
+        except OSError:
+            pass
+    return pids
+
+
+def fake_gripper_cm(arm):
+    """A process that looks like a Robotiq gripper controller manager (__ns:=/<arm>/gripper), like on the real
+    machine. It must NOT count as an arm process (hardware bug 2026-11-21: restart refused, gates not ended)."""
+    name = f'/opt/ros/humble/lib/controller_manager/ros2_control_node --ros-args -r __ns:=/{arm}/gripper'
+    return subprocess.Popen(['bash', '-c', f'exec -a "{name}" sleep 600'])
+
+
 class Client:
     def __init__(self, node):
         self.node = node
@@ -99,11 +119,11 @@ def main():
     spin.start()
     R = Results()
 
-    def start_sup():
+    def start_sup(cfg=sim_cfg, home_file=home):
         log = open(os.path.join(logdir, 'supervisor.log'), 'a')
-        return subprocess.Popen([sys.executable, SUP, '--sim', '--bringup', '--robot-config', sim_cfg,
+        return subprocess.Popen([sys.executable, SUP, '--sim', '--bringup', '--robot-config', cfg,
                                  '--no-grippers', '--no-gello', '--no-cameras', '--holder-file', holder,
-                                 '--home-file', home, '--lock-file', os.path.join(logdir, 'home.lock'),
+                                 '--home-file', home_file, '--lock-file', os.path.join(logdir, 'home.lock'),
                                  '--gate-args', f'--holder-file {holder} --wait-timeout 8'],
                                 stdout=log, stderr=subprocess.STDOUT)
 
@@ -190,40 +210,75 @@ def main():
     gello(MOCK_BASE, MOCK_BASE)
     c.call('start')
     R.check(sc, 'TELEOP', c.wait_state('TELEOP', 20), c.state()[1])
-    pids = []
-    for pid in subprocess.run(['pgrep', '-f', CM_PATTERN + r'.*__ns:=/right'], capture_output=True,
-                              text=True).stdout.split():
-        try:
-            with open(f'/proc/{pid}/environ', 'rb') as f:
-                if b'ROS_DOMAIN_ID=77\0' in f.read():      # sim only, never a real stack
-                    pids.append(int(pid))
-        except OSError:
-            pass
+    fakes = [fake_gripper_cm(a) for a in ('left', 'right')]
+    time.sleep(0.5)
+    pids = sim_pids(CM_PATTERN + r' --ros-args -r __ns:=/right ')
     R.check(sc, 'found exactly one sim right ros2_control_node', len(pids) == 1, str(pids))
+    t_crash = time.monotonic()
     for pid in pids:
         os.kill(pid, signal.SIGABRT)
     R.check(sc, 'ERROR', c.wait_state('ERROR', 30), c.state()[1])
+    msg0 = c.state()[1]
+    ok, msg = c.call('stop')                         # operator presses STOP in ERROR (O8)
+    R.check(sc, 'STOP in ERROR: accepted, says already stopped', ok is True and 'already stopped' in msg, msg)
     time.sleep(3)
     msg = c.state()[1]
-    R.check(sc, 'message names right arm + SHUTDOWN and BRINGUP',
-            'right: arm process died' in msg and 'SHUTDOWN and BRINGUP' in msg, msg)
+    R.check(sc, 'still ERROR, message not replaced by "component stopped"',
+            c.state()[0] == 'ERROR' and 'component stopped' not in msg, f'{c.history[-3:]} {msg}')
+    R.check(sc, 'message names right arm + ERROR RECOVERY',
+            'right: arm process died' in msg and 'ERROR RECOVERY' in msg, f'{msg} (first: {msg0})')
     end = time.monotonic() + 30
     while time.monotonic() < end and running(GATE_PATTERN):
-        time.sleep(0.5)
+        time.sleep(0.1)
+    R.check(sc, 'gates gone within 8 s of the crash (no 15 s retries, O9)', time.monotonic() - t_crash < 8,
+            f'{time.monotonic() - t_crash:.1f} s')
     time.sleep(1)
     msg = c.state()[1]
     R.check(sc, 'gates gone, no false "use E-stop" alarm', not running(GATE_PATTERN) and 'E-stop,' not in msg
             and 'could not be deactivated' not in msg, msg)
     ok, msg = c.call('recover')
-    R.check(sc, 'RECOVER refused (stack gone)', ok is False and 'arm stack has stopped' in msg, msg)
+    R.check(sc, 'ERROR RECOVERY accepted: restarts the arm stack', ok is True and 'restarting' in msg, msg)
+    R.check(sc, 'IDLE again (arm stack restarted, gripper CMs ignored)', c.wait_state('IDLE', 90),
+            f'{c.history[-4:]} {c.state()[1]}')
+    for f in fakes:
+        f.kill()
+        f.wait()
+    R.check(sc, 'went through RECOVERING and STARTING_UP',
+            'RECOVERING' in c.history and 'STARTING_UP' in c.history[c.history.index('RECOVERING'):], str(c.history))
+    R.check(sc, 'both controllers inactive after restart', ctrl('left') == ctrl('right') == 'inactive')
+    c.call('start')
+    R.check(sc, 'START after restart -> TELEOP', c.wait_state('TELEOP', 20), c.state()[1])
+    c.call('stop')
+    R.check(sc, 'STOP -> IDLE, controllers inactive',
+            c.wait_state('IDLE', 20) and ctrl('left') == ctrl('right') == 'inactive', c.state()[1])
+    ok, msg = c.call('recover')
+    R.check(sc, 'RECOVER in IDLE without crash: normal path (refused in sim)', ok is False and 'sim' in msg, msg)
+
+    sc = 'T6c crash, then SHUTDOWN at once (gates may still be exiting, O9)'
+    print(f'\n== {sc}', flush=True)
+    gello(MOCK_BASE, MOCK_BASE)
+    c.call('start')
+    R.check(sc, 'TELEOP', c.wait_state('TELEOP', 20), c.state()[1])
+    fakes = [fake_gripper_cm(a) for a in ('left', 'right')]
+    time.sleep(0.5)
+    pids = sim_pids(CM_PATTERN + r' --ros-args -r __ns:=/left ')
+    R.check(sc, 'found exactly one sim left ros2_control_node', len(pids) == 1, str(pids))
+    for pid in pids:
+        os.kill(pid, signal.SIGABRT)
+    R.check(sc, 'ERROR', c.wait_state('ERROR', 30), c.state()[1])
     ok, msg = c.call('shutdown')
-    R.check(sc, 'SHUTDOWN accepted', ok is True, msg)
-    R.check(sc, 'OFFLINE', c.wait_state('OFFLINE', 40), c.state()[1])
-    time.sleep(2)
-    R.check(sc, 'no ros2_control_node left', not running(CM_PATTERN))
+    R.check(sc, 'SHUTDOWN accepted in ERROR', ok is True, msg)
+    R.check(sc, 'OFFLINE', c.wait_state('OFFLINE', 60), c.state()[1])
+    for f in fakes:
+        f.kill()
+        f.wait()
+    time.sleep(5)
+    R.check(sc, 'stays OFFLINE (no late ERROR from exiting gates)', c.state()[0] == 'OFFLINE',
+            f'{c.history[-4:]} {c.state()[1]}')
+    R.check(sc, 'no gate / ros2_control_node left', not running(GATE_PATTERN) and not running(CM_PATTERN))
     ok, msg = c.call('bringup')
     R.check(sc, 'BRINGUP accepted', ok is True, msg)
-    R.check(sc, 'IDLE again (crash flag cleared)', c.wait_state('IDLE', 90), c.state()[1])
+    R.check(sc, 'IDLE again', c.wait_state('IDLE', 90), c.state()[1])
 
     sc = 'T7 supervisor killed (SIGKILL) during TELEOP'
     print(f'\n== {sc}', flush=True)
@@ -247,6 +302,49 @@ def main():
         time.sleep(0.5)
     R.check(sc, 'whole stack shut down (launches got SIGINT)',
             not running(CM_PATTERN) and not running(GATE_PATTERN))
+
+    sc = 'T8 HOME: the arm that arrives first must not stop the other (O10)'
+    print(f'\n== {sc}', flush=True)
+    # mock robots cannot move: left home = mock pose (DONE after the 1 s hold), right home 0.3 rad away on j1
+    # (never reached). Old supervisor: left DONE -> right stopped at once. Fixed: right keeps going.
+    with open(sim_cfg) as f:
+        cfg = yaml.safe_load(f)
+    for v in cfg.values():
+        if isinstance(v, dict) and v.get('namespace') == 'right':
+            v['robot_ip'] = '0.0.0.1'
+    cfg8 = os.path.join(logdir, 'sim_cfg_t8.yaml')
+    with open(cfg8, 'w') as f:
+        yaml.safe_dump(cfg, f)
+    safety_check(cfg8)
+    home8 = os.path.join(logdir, 'sim_home_poses_t8.txt')
+    with open(home8, 'w') as f:
+        f.write('0.0.0.0 ' + ' '.join(f'{q:.6f}' for q in MOCK_BASE) + '\n')
+        f.write('0.0.0.1 ' + ' '.join(f'{q + 0.3 if i == 0 else q:.6f}' for i, q in enumerate(MOCK_BASE)) + '\n')
+    gello(SIM_HOLDER, SIM_HOLDER)
+    c.history.clear()
+    sup = start_sup(cfg8, home8)
+    R.check(sc, 'bringup IDLE', c.wait_state('IDLE', 90), c.state()[1])
+    ok, msg = c.call('home')
+    R.check(sc, 'HOME accepted', ok is True, msg)
+    end = time.monotonic() + 20
+    while time.monotonic() < end and not c.status.get('arms', {}).get('left', {}).get('gate', '').startswith('DONE'):
+        time.sleep(0.05)
+    R.check(sc, 'left reached home (DONE)', time.monotonic() < end, str(c.status.get('arms', {}).get('left')))
+    time.sleep(3)
+    rg = c.status.get('arms', {}).get('right', {}).get('gate', '')
+    R.check(sc, 'right still moving 3 s later (not stopped by left)',
+            c.state()[0] == 'HOMING' and rg.startswith('MOVING') and ctrl('right') == 'active', f'{c.state()} {rg}')
+    ok, msg = c.call('stop')
+    R.check(sc, 'STOP -> IDLE', ok is True and c.wait_state('IDLE', 20), c.state()[1])
+    R.check(sc, 'final message: left DONE, right stopped by STOP',
+            'left: stopped - DONE' in c.state()[1] and 'right: stopped - STOPPED' in c.state()[1], c.state()[1])
+    R.check(sc, 'controllers inactive', ctrl('left') == ctrl('right') == 'inactive')
+    sup.send_signal(signal.SIGINT)
+    try:
+        sup.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        sup.kill()
+    R.check(sc, 'supervisor exited, stack shut down', not running(CM_PATTERN) and not running(GATE_PATTERN))
 
     for a in arms.values():
         a.set_gello(None)

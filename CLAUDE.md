@@ -216,7 +216,25 @@ TEST SESSION 1 (2026-11-20 20:33-21:26): scripts/test_recorder.py (read-only) ->
   supervisor bugs O8 (STOP in ERROR overwrites message), O9 (SHUTDOWN while gates exiting), O10 (HOME: DONE arm
   stops the other), O4 (consequence error listed as cause).
   Robots left: Programming mode, FCI off, no control holder.
-NEXT (ask user first, diff + sim test before hardware): user to answer what happened at 20:43:10, 21:02:06,
+S2-S6 DONE in sim (2026-11-21, branch fix/s2-s6-recorder-supervisor, sim 68/68 incl. new T6c, T8; diff shown):
+  User: 20:43 double reflex = Rubik's cube held in one hand, other hand twisting a stuck layer (arms pushed against
+  each other via the cube); one single reflex = gripper touched the table. Other 2 single reflexes unexplained.
+  S2: test_recorder.py writes motion_<arm>.csv (|F_ext|, tau_ext, dq, command error/step, contact flags, 10 Hz) +
+  PEAK / "LAST 3 s" lines. S3 STOP in ERROR keeps the message. S4 gates killed once arm launch + all
+  ros2_control_nodes are gone; SHUTDOWN waits for gates. S5 HOME: arm that arrives (exit 0, unsignalled) doesn't
+  stop the other. S6 crash_causes(): first failure = cause, later "also ... X s later" / "stopped as a consequence".
+  ERROR RECOVERY after an arm crash now RESTARTS the arm stack only (grippers/GELLO/cameras keep running,
+  controllers inactive; sim 2 s); no new GUI button. START timeout 60 s (--start-timeout, gate --wait-timeout).
+  Gate (sim 109/109 + 15/15): S1 LIVE smoothing (LiveSmoother: segment to each GELLO sample over the measured
+  interval, 200 Hz, cap 2.0 rad/s; --live-hz 0 = old raw relay), S8 near joint limit -> keep waiting with hint,
+  S7 RESYNC in HOLD (GELLO still 2 s off snapshot -> deactivate, fresh instance, ramp to new pose; --resync-time 0
+  = off). Supervisor sim 69/69. Backups of pre-change files: git (commit 4ea0637).
+  HARDWARE TESTS OPEN (ask first): S1 smoothing feel + reflex rate with test_recorder running, RESYNC, ERROR
+  RECOVERY restart after a real reflex / E-stop. DECIDED 2026-11-21: keep the robots' own collision limits (no SetForceTorqueCollisionBehavior);
+  revisit only with S2 force data. S11 DECIDED 2026-11-21: keep as is (no max start distance, ramp
+  speed factor 0.2 unchanged). Push to GitHub only
+  at the very end (user).
+OLD NEXT (ask user first, diff + sim test before hardware): user to answer what happened at 20:43:10, 21:02:06,
   21:03:43; then S1 (gate LIVE smoothing 200 Hz + speed cap) + S2 (recorder logs external force), then S3-S6 bug
   fixes, then S7-S9 UX; S11 is a user decision (max start distance / slower ramp). Run test_recorder during tests.
 OLD PLAN, supervisor on hardware:

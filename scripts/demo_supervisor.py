@@ -24,6 +24,7 @@ import argparse
 import ctypes
 import fcntl
 import json
+import math
 import os
 import queue
 import re
@@ -97,6 +98,48 @@ def _child_setup(sig):
         os.setsid()                                     # own process group: terminal Ctrl-C can't reach it
         _libc.prctl(PR_SET_PDEATHSIG, int(sig))         # die with the supervisor (main thread forks)
     return f
+
+
+# the ARM controller managers only: each Robotiq gripper runs its own ros2_control_node (__ns:=/<arm>/gripper),
+# which must not count as "arm processes still running" (bug seen on hardware 2026-11-21)
+ARM_CM_PATTERN = r'^/opt/ros/humble/lib/controller_manager/ros2_control_node --ros-args -r __ns:=/(left|right) '
+
+
+def crash_causes(text):
+    """Plain words for dead ros2_control_nodes in an arms.log text, FIRST failure first ('' if none died).
+    Later failures are marked: a communication violation / bare process death right after another arm failed
+    is a consequence (the launch shut that arm down while its controller was active)."""
+    node_arm = dict(re.findall(r'\[ros2_control_node-(\d+)\]: process has died .*?__ns:=/(\w+)', text))
+    if not node_arm:
+        return ''
+    first = {}                                  # node -> (time, libfranka message), first error per node
+    for n, t, what in re.findall(r'\[ros2_control_node-(\d+)\] \[ERROR\] \[(\d+\.\d+)\] '
+                                 r'\[FrankaHardwareInterface\]: libfranka: (.*)', text):
+        first.setdefault(n, (float(t), what))
+    for n, what in re.findall(r'\[ros2_control_node-(\d+)\]\s+what\(\):\s+(.*)', text):
+        first.setdefault(n, (math.inf, what.replace('libfranka: ', '')))
+
+    def words(what):
+        m = re.search(r'aborted by reflex! \[(.*?)\]', what)
+        return f'motion aborted by robot reflex ({m.group(1).replace(chr(34), "")})' if m else what.strip()
+    order = sorted(node_arm, key=lambda n: (first.get(n, (math.inf + 1,))[0], int(n)))
+    t0 = first.get(order[0], (math.inf,))[0]
+    out = []
+    for i, n in enumerate(order):
+        arm = node_arm[n]
+        if n not in first:
+            out.append(f'{arm}: arm process died' + (' (as a consequence)' if i else ''))
+            continue
+        t, what = first[n]
+        w = words(what)
+        later = f' {t - t0:.2f} s later' if math.isfinite(t) and math.isfinite(t0) else ''
+        if i == 0:
+            out.append(f'{arm}: {w}')
+        elif 'communication_constraints_violation' in what:
+            out.append(f'{arm}: stopped as a consequence ({w}{later})')
+        else:
+            out.append(f'{arm}: also {w}{later}')
+    return '; '.join(out)
 
 
 class Proc:
@@ -293,6 +336,8 @@ class Supervisor(Node):
             s = self.state
             if cmd == 'stop':                                   # never refused
                 self.cmdq.put('stop')
+                if s == 'ERROR':
+                    return True, 'robots already stopped (ERROR) - see the message for what to do'
                 return True, 'stopping' if self.gates else 'nothing to stop (robots already holding)'
             if cmd == 'start':
                 if s != 'IDLE':
@@ -312,9 +357,12 @@ class Supervisor(Node):
             elif cmd == 'recover':
                 if s not in ('ERROR', 'IDLE'):
                     return False, f'refused: RECOVER needs ERROR or IDLE (now {s})'
-                if self.arms_crash_reported:
-                    return False, ('refused: the arm stack has stopped - SHUTDOWN, then BRINGUP '
-                                   '(RECOVER afterwards only if a robot still shows REFLEX)')
+                if self.arms_crash_reported:            # arm stack gone -> restart it (nothing moves)
+                    bad = self.desk_not_ready()
+                    if bad:
+                        return False, f'refused: {bad}'
+                    self.cmdq.put(cmd)
+                    return True, 'restarting the arm stack (controllers inactive, robots do not move)'
                 if self.a.sim:
                     return False, 'refused: no error recovery in sim'
             elif cmd == 'bringup':
@@ -409,17 +457,7 @@ class Supervisor(Node):
         self.error = None
         self.arms_crash_reported = False
         self.set_state('STARTING_UP', 'starting arms (controllers inactive)')
-        args = [os.path.join(DEMO, 'launch', 'arms_gated.launch.py'), 'arms:=left,right']
-        if self.a.robot_config:
-            args.append(f'robot_config:={self.a.robot_config}')
-        self.launch('arms', args)
-        if not self.a.sim:      # sim has no franka_robot_state_broadcaster
-            thr = os.path.join(subprocess.run(['ros2', 'pkg', 'prefix', 'topic_tools'], capture_output=True,
-                                              text=True).stdout.strip(), 'lib', 'topic_tools', 'throttle')
-            for arm in ARMS:
-                self.bringup['throttle_' + arm] = Proc(
-                    'throttle_' + arm, [thr, 'messages', f'/{arm}/franka_robot_state_broadcaster/robot_state',
-                                        '10.0', f'/{arm}/robot_state_10hz'], self.logdir, signal.SIGINT)
+        self.start_arms()
         if self.a.grippers:
             gcfg = self.load_yaml(os.path.join(
                 subprocess.run(['ros2', 'pkg', 'prefix', 'franka_gripper_manager'], capture_output=True,
@@ -440,6 +478,35 @@ class Supervisor(Node):
         self.cameras_reported = False
         self.event('bringup started (grippers do their activation open/close)' if self.a.grippers
                    else 'bringup started')
+
+    def start_arms(self):
+        """Arm stack (both ros2_control_nodes, impedance controller loaded INACTIVE) + robot state throttles."""
+        args = [os.path.join(DEMO, 'launch', 'arms_gated.launch.py'), 'arms:=left,right']
+        if self.a.robot_config:
+            args.append(f'robot_config:={self.a.robot_config}')
+        self.launch('arms', args)
+        if not self.a.sim:      # sim has no franka_robot_state_broadcaster
+            thr = os.path.join(subprocess.run(['ros2', 'pkg', 'prefix', 'topic_tools'], capture_output=True,
+                                              text=True).stdout.strip(), 'lib', 'topic_tools', 'throttle')
+            for arm in ARMS:
+                self.bringup['throttle_' + arm] = Proc(
+                    'throttle_' + arm, [thr, 'messages', f'/{arm}/franka_robot_state_broadcaster/robot_state',
+                                        '10.0', f'/{arm}/robot_state_10hz'], self.logdir, signal.SIGINT)
+
+    def restart_arms(self):
+        """ERROR RECOVERY after an arm stack crash (reflex / E-stop): restart only the arm stack. Grippers, GELLO
+        and cameras keep running. Controllers come up inactive -> the robots do not move."""
+        self.set_state('RECOVERING', 'restarting the arm stack (grippers, GELLO, cameras keep running)')
+        self.end_gates()
+        self.stop_procs(['throttle_left', 'throttle_right', 'arms'])
+        if subprocess.run(['pgrep', '-f', ARM_CM_PATTERN], stdout=subprocess.DEVNULL).returncode == 0:
+            return self.set_state('ERROR', 'restart failed: old arm processes still running - SHUT DOWN, then BRING UP')
+        self.error = None
+        self.arms_crash_reported = False
+        self.start_arms()
+        self.t_bringup = time.monotonic()
+        self.event('arm stack restarted')
+        self.set_state('STARTING_UP', 'restarting arms (controllers inactive)')
 
     def check_bringup_ready(self):
         missing = []
@@ -462,21 +529,9 @@ class Supervisor(Node):
         try:
             with open(arms.log_path, errors='replace') as f:
                 f.seek(arms.log_offset)
-                text = f.read()
+                return crash_causes(f.read())
         except OSError:
             return ''
-        node_arm = dict(re.findall(r'\[ros2_control_node-(\d+)\]: process has died .*?__ns:=/(\w+)', text))
-        if not node_arm:
-            return ''
-        causes = {}
-        for n, what in re.findall(r'\[ros2_control_node-(\d+)\]\s+what\(\):\s+(.*)', text):
-            m = re.search(r'aborted by reflex! \[(.*?)\]', what)
-            causes[node_arm.get(n, f'node {n}')] = (
-                f'motion aborted by robot reflex ({m.group(1).replace(chr(34), "")})' if m
-                else what.replace('libfranka: ', '').strip())
-        for arm in node_arm.values():
-            causes.setdefault(arm, 'arm process died')
-        return '; '.join(f'{a}: {c}' for a, c in sorted(causes.items()))
 
     def report_arm_crash(self):
         """Arm stack ended: the Franka has stopped both robots (no ROS control any more)."""
@@ -484,8 +539,36 @@ class Supervisor(Node):
         self.stop_gates()
         cause = self.arm_crash_cause() or 'arm stack stopped'
         self.error = (f'{cause} - robots stopped by the Franka. Check the robots (release E-stop), '
-                      f'then SHUTDOWN and BRINGUP (logs: {self.logdir})')
+                      f'then press ERROR RECOVERY (logs: {self.logdir})')
         self.set_state('ERROR', self.error)
+
+    def kill_orphan_gates(self):
+        """Arm launch gone and no ros2_control_node left: a gate has nothing left to deactivate (it would only
+        retry ~15 s against a missing controller manager), so end it at once."""
+        arms = self.bringup.get('arms')
+        if not self.gates or not (arms is None or not arms.alive()):
+            return
+        alive = [arm for arm, p in self.gates.items() if p.alive()]
+        if alive and subprocess.run(['pgrep', '-f', ARM_CM_PATTERN], stdout=subprocess.DEVNULL).returncode != 0:
+            for arm in alive:
+                self.gates[arm].p.kill()
+            self.event(f'gates {", ".join(alive)} ended: arm stack gone, nothing left to deactivate')
+
+    def end_gates(self):
+        """Signal the gates and wait until they are gone (deactivate -> robots hold); KILL after 20 s."""
+        if not self.gates:
+            return
+        self.stop_gates()
+        end = time.monotonic() + 20
+        while any(p.alive() for p in self.gates.values()) and time.monotonic() < end:
+            self.kill_orphan_gates()
+            time.sleep(0.1)
+        for arm, p in self.gates.items():
+            if p.alive():
+                self.get_logger().error(f'gate {arm} still alive 20 s after signal - KILL')
+                p.p.kill()
+        self.gates.clear()
+        self.gate_mode = None
 
     def stop_gates(self, sig=signal.SIGINT):
         for p in self.gates.values():
@@ -493,8 +576,15 @@ class Supervisor(Node):
 
     def stop_bringup(self):
         """Gates must already be gone. Stops launches in reverse order, then releases the lock."""
-        for name in ['cameras', 'gello', 'gripper_left', 'gripper_right', 'throttle_left', 'throttle_right', 'arms']:
-            p = self.bringup.get(name)
+        self.stop_procs(['cameras', 'gello', 'gripper_left', 'gripper_right', 'throttle_left', 'throttle_right',
+                         'arms'])
+        self.bringup.clear()
+        self.release_lock()
+
+    def stop_procs(self, names):
+        """SIGINT each (in order), escalate to SIGTERM / KILL; removes them from the bringup."""
+        for name in names:
+            p = self.bringup.pop(name, None)
             if p and p.alive():
                 p.signal(signal.SIGINT)
                 end = time.monotonic() + (20 if name == 'arms' else 10)
@@ -506,15 +596,15 @@ class Supervisor(Node):
                     time.sleep(3)
                     if p.alive():
                         p.p.kill()
-        self.bringup.clear()
-        self.release_lock()
 
     def start_gates(self, mode):
         self.gate_mode = mode
         with self.lock:
             self.gate_state = {arm: '' for arm in ARMS}
         for arm in ARMS:
-            cmd = [sys.executable, GATE, '--arm', arm, *self.a.gate_args.split()]
+            # --wait-timeout first: --gate-args (sim tests) may override it
+            cmd = [sys.executable, GATE, '--arm', arm, '--wait-timeout', str(self.a.start_timeout),
+                   *self.a.gate_args.split()]
             if mode == 'home':
                 # '=' form: a pose starting with a negative value must not be parsed as an option
                 cmd += ['--target-joints=' + ','.join(f'{q:.5f}' for q in self.home[arm]),
@@ -523,6 +613,8 @@ class Supervisor(Node):
                                    signal.SIGTERM)
 
     def do_recover(self):
+        if self.arms_crash_reported:
+            return self.restart_arms()
         self.set_state('RECOVERING', 'Franka automatic error recovery on both arms')
         futs = {}
         for arm in ARMS:
@@ -554,13 +646,18 @@ class Supervisor(Node):
         if cmd == 'stop':
             if self.gates:
                 self.stop_gates()
-                self.set_state('STOPPING', 'deactivating controllers (robots hold)')
+                if self.state != 'ERROR':                   # keep the ERROR message (what happened, what to do)
+                    self.set_state('STOPPING', 'deactivating controllers (robots hold)')
             return
         if cmd == 'bringup':
             return self.do_bringup()
         if cmd == 'shutdown':
+            if self.gates:
+                self.set_state('SHUTTING_DOWN', 'waiting for the gates to exit (robots hold)')
+                self.end_gates()
             self.set_state('SHUTTING_DOWN', 'stopping cameras, GELLO, grippers, arms')
             self.stop_bringup()
+            self.error = None
             return self.set_state('OFFLINE', 'shut down')
         if cmd == 'recover':
             return self.do_recover()
@@ -586,7 +683,9 @@ class Supervisor(Node):
                 self.event(f'cameras stopped (rc {cam.rc()}, see {self.logdir}/cameras.log) - arms unaffected')
             if 'arms' in dead and not self.arms_crash_reported:
                 return self.report_arm_crash()        # also replaces an earlier ERROR message
-            if dead and s != 'ERROR':
+            if 'arms' in dead:
+                self.kill_orphan_gates()
+            if dead and self.error is None:
                 self.stop_gates()
                 self.error = f'component stopped: {", ".join(dead)} (see {self.logdir}) - SHUTDOWN and BRINGUP'
                 return self.set_state('ERROR', self.error)
@@ -608,13 +707,17 @@ class Supervisor(Node):
                 if r['mode'] in ('REFLEX', 'USER_STOPPED') and s != 'ERROR':
                     self.stop_gates()
                     words = f'{arm}: {r["mode"]}' + (f' ({", ".join(r["errors"])})' if r['errors'] else '')
-                    self.error = words + ' - release E-stop / clear, then RECOVER'
+                    self.error = words + ' - release E-stop / clear, then press ERROR RECOVERY'
                     return self.set_state('ERROR', self.error)
         # gates
         if self.gates:
             ended = {arm: p.rc() for arm, p in self.gates.items() if not p.alive()}
             if ended and len(ended) < len(self.gates):
-                self.stop_gates()                           # one ended -> stop the other
+                # one ended -> stop the other, except in HOME when it simply arrived (exit 0, never signalled)
+                arrived = self.gate_mode == 'home' and all(
+                    rc == 0 and self.gates[a].t_signal is None for a, rc in ended.items())
+                if not arrived:
+                    self.stop_gates()
             for arm, p in self.gates.items():
                 if p.alive() and p.t_signal and time.monotonic() - p.t_signal > 15:
                     self.get_logger().error(f'gate {arm} still alive 15 s after signal - SIGTERM/KILL')
@@ -635,6 +738,7 @@ class Supervisor(Node):
         mode = self.gate_mode
         words = {0: 'stopped', 2: 'refused', 3: 'fault', 4: 'DEACTIVATION FAILED', 5: 'startup error'}
         detail = '; '.join(f'{a}: {words.get(c, c)} - {self.gate_state[a]}' if self.gate_state[a]
+                           else f'{a}: stopped before it started' if self.gates[a].t_signal and c in (0, -2, -15)
                            else f'{a}: exited before starting (rc {c}, see {self.logdir})'
                            for a, c in codes.items())
         self.gates.clear()
@@ -724,6 +828,8 @@ def main():
     ap.add_argument('--home-file', default=os.path.expanduser('~/fr3_tools/fr3_duo_home/home_poses.txt'))
     ap.add_argument('--lock-file', default=os.path.expanduser('~/fr3_tools/.home.lock'))
     ap.add_argument('--bringup-timeout', type=float, default=90.0)
+    ap.add_argument('--start-timeout', type=float, default=60.0,
+                    help='START: time to lift the GELLOs out of the holders and hold them still (gate default 30 s)')
     a = ap.parse_args(rclpy.utilities.remove_ros_args(sys.argv)[1:])
     if a.sim and (os.environ.get('ROS_DOMAIN_ID') != '77' or os.environ.get('ROS_LOCALHOST_ONLY') != '1'):
         sys.exit('--sim needs ROS_DOMAIN_ID=77 and ROS_LOCALHOST_ONLY=1')
