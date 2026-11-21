@@ -17,7 +17,7 @@ python3 scripts/demo_gui.py --preview --single   # one window with tabs (laptop)
 ```
 
 `--preview` uses ROS domain 199, fills the GUI with demo data and **sends nothing**. Press **F9** to
-show a demo ERROR state (F5/F6/F7 = pedal START/STOP/HOME, F10 = drop a camera). See [GUI_CHANGES.md](GUI_CHANGES.md).
+show a demo ERROR state (F5/F6/F7 = pedal START/STOP/HOME, F10 = drop a camera, F11 = depth available / not). See [GUI_CHANGES.md](GUI_CHANGES.md).
 
 ## Interface to the supervisor (do not change without agreeing with the supervisor side)
 
