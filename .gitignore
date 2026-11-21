@@ -19,3 +19,6 @@ assets/brand/*.jpg
 .vscode/
 .idea/
 *.swp
+
+# local tool state (Claude Code worktrees etc.)
+.claude/

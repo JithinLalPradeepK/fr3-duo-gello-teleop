@@ -1,0 +1,29 @@
+# Inter-arm collision guard settings (hand-edited). Geometry itself: config/duo_geometry.yaml (generated).
+# Used by scripts/duo_geometry.py -> scripts/gello_gate.py (START / HOME path check, LIVE command limiting).
+#
+# Distances are SURFACE distances between the (conservative) bounding capsules of the two arms, in metres.
+# The capsules enclose the real FR3 collision meshes, so the real surfaces are usually further apart than these.
+margins:
+  arm: 0.04          # any capsule of one arm vs any capsule of the other arm (links, wrists, gripper vs link)
+  gripper: 0.01      # gripper vs gripper only: two-handed tasks (Rubik's cube) need the hands close together
+radius_scale: 1.0    # 1.0 = capsules as fitted; >1 = more conservative
+
+# Gripper (Robotiq 2F-85 + adapter) as one capsule in the FR3 flange frame (z along the approach axis).
+# Dimensions are an estimate; measure and adjust if a different gripper / a tool is mounted.
+gripper:
+  p0: [0.0, 0.0, 0.02]
+  p1: [0.0, 0.0, 0.17]
+  radius: 0.065
+
+# Link pairs that are ALWAYS close by design (both bases sit 10 cm apart on the Duo mount): ignored when BOTH
+# links are in this list. Everything else is checked.
+base_links: [link0, link1, link2]
+
+# Which Duo mount slot (description names "left" = +y, "right" = -y) each robot NAMESPACE sits in.
+# Our namespaces are named "as seen from the front" (left = IP .51, right = IP .50) and turn out to be SWAPPED
+# relative to the mount description. Evidence (2026-11-21): with the saved home poses (used many times without
+# collision) only the swapped assignment is collision-free, and it reproduces the ~5 cm height difference seen
+# at home; the straight assignment would put both grippers into each other. Change here if the hardware is rewired.
+slots:
+  left: right
+  right: left

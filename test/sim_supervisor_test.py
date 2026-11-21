@@ -17,6 +17,9 @@ import yaml
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from franka_msgs.action import ErrorRecovery
+from franka_msgs.msg import FrankaRobotState
+from rclpy.action import ActionServer
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -51,6 +54,29 @@ def fake_gripper_cm(arm):
     machine. It must NOT count as an arm process (hardware bug 2026-11-21: restart refused, gates not ended)."""
     name = f'/opt/ros/humble/lib/controller_manager/ros2_control_node --ros-args -r __ns:=/{arm}/gripper'
     return subprocess.Popen(['bash', '-c', f'exec -a "{name}" sleep 600'])
+
+
+class FakeFranka:
+    """Stands in for franka_robot_state_broadcaster (robot_mode on /<arm>/robot_state_10hz) and the Franka
+    error_recovery action servers, which the fake-hardware sim does not have."""
+
+    def __init__(self, node):
+        self.mode = None                      # None = not publishing, 1 = IDLE, 4 = REFLEX
+        self.goals = {'left': 0, 'right': 0}
+        self.pub = {a: node.create_publisher(FrankaRobotState, f'/{a}/robot_state_10hz', 5) for a in self.goals}
+        self.srv = [ActionServer(node, ErrorRecovery, f'/{a}/action_server/error_recovery',
+                                 lambda gh, a=a: self.execute(a, gh)) for a in self.goals]
+        node.create_timer(0.1, self.tick)
+
+    def execute(self, arm, gh):
+        self.goals[arm] += 1
+        gh.succeed()
+        return ErrorRecovery.Result()
+
+    def tick(self):
+        if self.mode is not None:
+            for p in self.pub.values():
+                p.publish(FrankaRobotState(robot_mode=self.mode))
 
 
 class Client:
@@ -112,6 +138,7 @@ def main():
     rclpy.init()
     node = Node('sim_supervisor_test')
     arms = {a: Arm(node, a) for a in ('left', 'right')}
+    fake = FakeFranka(node)
     c = Client(node)
     ex = MultiThreadedExecutor()
     ex.add_node(node)
@@ -236,10 +263,19 @@ def main():
     msg = c.state()[1]
     R.check(sc, 'gates gone, no false "use E-stop" alarm', not running(GATE_PATTERN) and 'E-stop,' not in msg
             and 'could not be deactivated' not in msg, msg)
+    fake.mode = 4                                    # robots still report REFLEX after the arm restart
     ok, msg = c.call('recover')
     R.check(sc, 'ERROR RECOVERY accepted: restarts the arm stack', ok is True and 'restarting' in msg, msg)
-    R.check(sc, 'IDLE again (arm stack restarted, gripper CMs ignored)', c.wait_state('IDLE', 90),
-            f'{c.history[-4:]} {c.state()[1]}')
+    end = time.monotonic() + 90
+    while time.monotonic() < end and not all(fake.goals.values()):
+        time.sleep(0.1)
+    R.check(sc, 'robot still in REFLEX after the restart -> Franka error recovery runs by itself (one goal per arm)',
+            fake.goals == {'left': 1, 'right': 1}, str(fake.goals))
+    fake.mode = 1                                    # the recovery cleared the reflex
+    R.check(sc, 'IDLE again after the automatic recovery (arm stack restarted, gripper CMs ignored)',
+            c.wait_state('IDLE', 30) and 'recovered' in c.state()[1], f'{c.history[-5:]} {c.state()[1]}')
+    time.sleep(3)
+    R.check(sc, 'recovery ran only once', fake.goals == {'left': 1, 'right': 1}, str(fake.goals))
     for f in fakes:
         f.kill()
         f.wait()

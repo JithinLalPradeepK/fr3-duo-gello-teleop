@@ -180,6 +180,7 @@ class Supervisor(Node):
         self.last_event = ''
         self.error = None                      # plain-words reason while in ERROR
         self.arms_crash_reported = False       # arm stack (ros2_control_node) ended unexpectedly
+        self.auto_recover_until = 0.0          # after an arm restart: run Franka error recovery once if REFLEX
         self.bringup = {}                      # name -> Proc
         self.gates = {}                        # arm -> Proc
         self.gate_mode = None                  # 'teleop' | 'home'
@@ -503,6 +504,7 @@ class Supervisor(Node):
             return self.set_state('ERROR', 'restart failed: old arm processes still running - SHUT DOWN, then BRING UP')
         self.error = None
         self.arms_crash_reported = False
+        self.auto_recover_until = time.monotonic() + 40.0
         self.start_arms()
         self.t_bringup = time.monotonic()
         self.event('arm stack restarted')
@@ -603,8 +605,10 @@ class Supervisor(Node):
             self.gate_state = {arm: '' for arm in ARMS}
         for arm in ARMS:
             # --wait-timeout first: --gate-args (sim tests) may override it
-            cmd = [sys.executable, GATE, '--arm', arm, '--wait-timeout', str(self.a.start_timeout),
-                   *self.a.gate_args.split()]
+            cmd = [sys.executable, GATE, '--arm', arm, '--wait-timeout', str(self.a.start_timeout)]
+            if self.a.guard:                  # duo collision guard: both gates check the arms against each other
+                cmd += ['--other-arm', 'right' if arm == 'left' else 'left']
+            cmd += self.a.gate_args.split()
             if mode == 'home':
                 # '=' form: a pose starting with a negative value must not be parsed as an option
                 cmd += ['--target-joints=' + ','.join(f'{q:.5f}' for q in self.home[arm]),
@@ -700,6 +704,18 @@ class Supervisor(Node):
             if self.message != f'waiting for: {", ".join(missing)}':
                 self.set_state('STARTING_UP', f'waiting for: {", ".join(missing)}')
             return
+        # after an arm-stack restart a robot may still be in REFLEX (it does not clear on reconnect, e.g. after a
+        # self-collision reflex): run the Franka error recovery ONCE instead of making the operator press twice.
+        # It does not move the robot. E-stop (USER_STOPPED) is not recoverable by software - normal ERROR path.
+        if self.auto_recover_until and s == 'IDLE':
+            fresh = [time.monotonic() - self.robot[a]['t'] < 1.0 for a in ARMS]
+            modes = [self.robot[a]['mode'] for a in ARMS]
+            if time.monotonic() > self.auto_recover_until or (all(fresh) and all(m == 'IDLE' for m in modes)):
+                self.auto_recover_until = 0.0
+            elif all(fresh) and 'REFLEX' in modes and 'USER_STOPPED' not in modes:
+                self.auto_recover_until = 0.0
+                self.event('robot still in REFLEX after the arm restart - running Franka error recovery')
+                return self.handle_cmd('recover')
         # robot errors (E-stop, reflex)
         if not self.a.sim and s not in ('OFFLINE', 'STARTING_UP', 'SHUTTING_DOWN', 'RECOVERING'):
             for arm in ARMS:
@@ -823,6 +839,8 @@ def main():
     ap.add_argument('--no-gello', dest='gello', action='store_false')
     ap.add_argument('--no-cameras', dest='cameras', action='store_false')
     ap.add_argument('--gate-args', default='')
+    ap.add_argument('--no-guard', dest='guard', action='store_false',
+                    help='switch the duo collision guard (arm-vs-arm check) off - diagnostics only')
     ap.add_argument('--holder-file', default=os.path.join(DEMO, 'config', 'gello_holder_poses.yaml'))
     ap.add_argument('--holder-tol', type=float, default=0.25)
     ap.add_argument('--home-file', default=os.path.expanduser('~/fr3_tools/fr3_duo_home/home_poses.txt'))

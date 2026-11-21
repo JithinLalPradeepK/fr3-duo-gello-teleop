@@ -26,6 +26,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32, String
 
 DEMO = os.path.expanduser('~/robot_demo')
+sys.path.insert(0, os.path.join(DEMO, 'scripts'))
 GATE = os.path.join(DEMO, 'scripts', 'gello_gate.py')
 TELEOP = os.path.join(DEMO, 'scripts', 'teleop_duo.sh')
 NAMES = [f'fr3_joint{i}' for i in range(1, 8)]
@@ -251,11 +252,39 @@ def analyse_prelive(arm, R, sc, snapshot_hint=None):
     return None
 
 
+class FakeOther:
+    """Stands in for the OTHER arm of the duo in single-gate tests: its robot joint states, its command topic
+    (what its gate relays) and its gate state - all under test control."""
+
+    def __init__(self, node, arm):
+        self.arm, self.on, self.q, self.cmd = arm, False, None, None
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+        self.p_robot = node.create_publisher(JointState, f'/{arm}/franka/joint_states', 10)
+        self.p_cmd = node.create_publisher(JointState, f'/{arm}/gello/joint_states', 10)
+        self.p_state = node.create_publisher(String, f'/{arm}/gello_gate/state', latched)
+        self.names = [f'{arm}_fr3_joint{i}' for i in range(1, 8)]
+        node.create_timer(0.02, self.tick)
+
+    def pose(self, q):
+        self.q, self.cmd = list(q), list(q)
+
+    def state(self, text):
+        self.p_state.publish(String(data=text))
+
+    def tick(self):
+        if self.on and self.q is not None:
+            self.p_robot.publish(JointState(name=self.names, position=self.q))
+            self.p_cmd.publish(JointState(name=self.names, position=self.cmd))
+
+
 def run_single(a, logdir):
     safety_check()
     rclpy.init()
     node = Node('sim_gate_driver')
     arm = Arm(node, a.arm)
+    other_arm = 'right' if a.arm == 'left' else 'left'
+    fake = FakeOther(node, other_arm)
     ex = MultiThreadedExecutor()
     ex.add_node(node)
     spin_thread = threading.Thread(target=ex.spin, daemon=True)
@@ -584,13 +613,32 @@ def run_single(a, logdir):
                                                                           for t in texts), f'rc={rc} {texts[-2:]}')
     R.check(sc, 'controller inactive, nothing relayed', arm.ctrl_state() == 'inactive' and len(arm.relayed) == 0)
 
-    # ---- S17: LIVE command clamped before the j4 zero-speed zone, slowing down on the FR3 speed curve
-    sc = 'S17 LIVE clamp at j4 limit'
+    # ---- S17: LIVE soft limit j4 -2.70 (self-collision zone seen on hardware at -2.83)
+    sc = 'S17 LIVE soft limit j4 -2.70'
     print(f'\n== {sc}', flush=True)
     p, ok = to_live(sc, 'S17')
     if ok:
         n_rel = len(arm.relayed)
-        arm.set_gello(lambda t: offset(3, -min(0.85, 0.3 * t)))   # GELLO j4 down to -3.206 (past the limit)
+        arm.set_gello(lambda t: offset(3, -min(0.85, 0.3 * t)))   # GELLO j4 down to -3.206 (past every limit)
+        time.sleep(4.5)
+        with arm.lock:
+            live = arm.relayed[n_rel:]
+        j4 = [q[3] for _, q in live]
+        R.check(sc, 'j4 command never below -2.70', min(j4) >= -2.70 - 1e-6, f'min {min(j4):.4f}')
+        R.check(sc, 'j4 command reaches the soft limit', min(j4) < -2.69, f'min {min(j4):.4f}')
+        steps = [abs(b[1][3] - a_[1][3]) for a_, b in zip(live, live[1:])]
+        R.check(sc, 'no step > 0.012 rad while clamping', max(steps) <= 0.012, f'max step {max(steps):.4f}')
+    p.send_signal(signal.SIGINT)
+    rc = wait_exit(p, 15)
+    R.check(sc, 'gate exit code 0, controller inactive', rc == 0 and arm.ctrl_state() == 'inactive')
+
+    # ---- S17b: soft limit off -> usable-range clamp (-3.037 + 0.1) with slow-down on the FR3 speed curve
+    sc = 'S17b LIVE clamp at the usable j4 range (--live-j4-min -9)'
+    print(f'\n== {sc}', flush=True)
+    p, ok = to_live(sc, 'S17b', ['--live-j4-min', '-9'])
+    if ok:
+        n_rel = len(arm.relayed)
+        arm.set_gello(lambda t: offset(3, -min(0.85, 0.3 * t)))
         time.sleep(4.5)
         with arm.lock:
             live = arm.relayed[n_rel:]
@@ -600,11 +648,130 @@ def run_single(a, logdir):
         R.check(sc, 'j4 command reaches the clamp', min(j4) < -2.93, f'min {min(j4):.4f}')
         v = [(b[1][3] - a_[1][3]) / (b[0] - a_[0]) for a_, b in zip(live, live[1:]) if b[0] - a_[0] > 0.003]
         near = [abs(x) for (t, q), x in zip(live[1:], v) if q[3] < -2.90]
-        R.check(sc, 'speed near the clamp <= 50 % of the FR3 limit there (~0.65 rad/s at -2.90 -> <= 0.4)',
+        R.check(sc, 'speed near the clamp <= 50 % of the FR3 limit there (<= 0.4 rad/s)',
                 max(near, default=0) <= 0.4, f'max {max(near, default=0):.3f} rad/s')
     p.send_signal(signal.SIGINT)
     rc = wait_exit(p, 15)
     R.check(sc, 'gate exit code 0, controller inactive', rc == 0 and arm.ctrl_state() == 'inactive')
+
+    # ---- S17c (unit): a snapshot beyond the soft limit (j4 -2.85, inside the usable range) is pulled in at the
+    #      capped speed, never snapped. The mock robot cannot move, so LiveSmoother is exercised directly.
+    sc = 'S17c snapshot beyond the soft limit is pulled in smoothly (unit)'
+    print(f'\n== {sc}', flush=True)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('gello_gate_mod', GATE)
+    gg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gg)
+    q0 = list(MOCK_BASE)
+    q0[3] = -2.85
+    sm = gg.LiveSmoother(q0, 2.0, 0.0, soft_min={3: -2.70})
+    sm.sample(q0, 0.0)
+    ys, t = [], 0.0
+    for _ in range(400):                      # 2 s at 200 Hz, GELLO held at -2.85 the whole time
+        t += 0.005
+        if round(t / 0.04) * 0.04 - t < 0.0025 and abs(round(t / 0.04) * 0.04 - t) < 0.0025:
+            sm.sample(q0, t)
+        ys.append(sm.step(t)[3])
+    steps = [abs(b - a_) for a_, b in zip([q0[3]] + ys, ys)]
+    R.check(sc, 'ends at the soft limit -2.70', abs(ys[-1] + 2.70) < 1e-3, f'{ys[-1]:.4f}')
+    R.check(sc, 'no jump (<= 0.01 rad per 5 ms)', max(steps) <= 0.01, f'max step {max(steps):.4f}')
+    R.check(sc, 'pull-in speed <= 50 % of the FR3 limit upward at -2.85 (min(2.62, 4.35) / 2 = 1.31 rad/s)',
+            max(steps) / 0.005 <= 1.35, f'{max(steps) / 0.005:.2f} rad/s')
+
+    # ---- duo collision guard (single gate + the other arm faked) ---------------------------------------------
+    import numpy as np
+    from duo_geometry import MIRROR, DuoGeometry
+    geo = DuoGeometry()
+    q_c = [0.755, 0.1, 0.576, -2.146, -0.956, 1.606, 0.085]      # left pose whose mirror image the right arm takes
+    q_o = list(np.array(q_c) * MIRROR)                           # (|y| = 0: the two arms would meet in the middle)
+    c0, _ = geo.clearance(base, q_o)
+    c1, _ = geo.clearance(q_c, q_o)
+    assert a.arm == 'left' and c0 > 0.10 and c1 < -0.05, (c0, c1)   # test setup precondition
+    guard = ['--other-arm', other_arm, '--wait-timeout', '6']
+
+    # ---- S18: path would collide -> REFUSED before any motion, with the reason
+    sc = 'S18 guard: ramp would collide with the other arm -> REFUSED'
+    print(f'\n== {sc}', flush=True)
+    fake.pose(q_o)
+    fake.on = True
+    fake.state('LIVE')
+    arm.reset_records()
+    arm.set_gello(lambda t: q_c)
+    p = start_gate(a.arm, logdir, 'S18', guard)
+    seen_active = False
+    while p.poll() is None:
+        seen_active |= arm.ctrl_state() == 'active'
+        time.sleep(0.1)
+    with arm.lock:
+        texts = [t for _, t in arm.states]
+    R.check(sc, 'gate exit code 2 (REFUSED)', p.returncode == 2, f'rc={p.returncode} {texts[-1:]}')
+    R.check(sc, 'went through BARRIER', any(t.startswith('BARRIER') for t in texts), str(texts[-4:]))
+    R.check(sc, 'reason says the arms would collide and names the links',
+            any('would collide' in t and 'link' in t for t in texts), texts[-1] if texts else '')
+    R.check(sc, 'controller never active (robot never moved)', not seen_active and arm.ctrl_state() == 'inactive')
+
+    # ---- S19: other arm not ready -> waits at the barrier, REFUSED at timeout (nothing moves)
+    sc = 'S19 guard: other arm gate not ready -> REFUSED at the barrier timeout'
+    print(f'\n== {sc}', flush=True)
+    fake.state('WAIT_STILL: waiting for controller manager')
+    arm.reset_records()
+    arm.set_gello(lambda t: base)
+    p = start_gate(a.arm, logdir, 'S19', ['--other-arm', other_arm, '--wait-timeout', '4'])
+    seen_active = False
+    while p.poll() is None:
+        seen_active |= arm.ctrl_state() == 'active'
+        time.sleep(0.1)
+    with arm.lock:
+        texts = [t for _, t in arm.states]
+    R.check(sc, 'gate exit code 2 (REFUSED)', p.returncode == 2, f'rc={p.returncode}')
+    R.check(sc, 'reason: other arm not ready', any('is not ready within' in t for t in texts), texts[-1] if texts else '')
+    R.check(sc, 'controller never active', not seen_active and arm.ctrl_state() == 'inactive')
+    fake.state('LIVE')
+
+    # ---- S20: LIVE limiter: GELLO drives the arm into the other arm -> command stops short, then follows back
+    sc = 'S20 guard: LIVE command limited before the arms touch'
+    print(f'\n== {sc}', flush=True)
+    p, ok = to_live(sc, 'S20', guard)
+    if ok:
+        n_rel = len(arm.relayed)
+        arm.set_gello(lambda t: [b + min(1.0, t / 3.0) * (c - b) for b, c in zip(base, q_c)])
+        time.sleep(5.0)
+        with arm.lock:
+            live = arm.relayed[n_rel:]
+            texts = [t for _, t in arm.states]
+        cl = [geo.clearance(q, q_o)[0] for _, q in live[::5]]
+        R.check(sc, 'raw GELLO target would collide (precondition)', geo.clearance(q_c, q_o)[0] < -0.05)
+        R.check(sc, 'command never closer than the margin (clearance >= -1 cm)', min(cl) >= -0.01,
+                f'min clearance {min(cl) * 100:.1f} cm over {len(cl)} samples')
+        last = live[-1][1]
+        R.check(sc, 'command stopped short of the GELLO target', max(abs(x - y) for x, y in zip(last, q_c)) > 0.15,
+                f'max joint diff to target {max(abs(x - y) for x, y in zip(last, q_c)):.3f} rad')
+        R.check(sc, 'it did move toward the target first', max(abs(x - y) for x, y in zip(last, base)) > 0.2,
+                f'max joint diff from start {max(abs(x - y) for x, y in zip(last, base)):.3f} rad')
+        R.check(sc, 'state said "LIVE: limited by the collision guard"',
+                any('limited by the collision guard' in t for t in texts), str(texts[-3:]))
+        steps = [max(abs(x - y) for x, y in zip(b[1], a_[1])) for a_, b in zip(live, live[1:])]
+        R.check(sc, 'no command step > 0.012 rad while limiting', max(steps) <= 0.012, f'max step {max(steps):.4f}')
+        arm.set_gello(lambda t: [c + min(1.0, t / 3.0) * (b - c) for b, c in zip(base, q_c)])   # smoothly back
+        time.sleep(4.0)
+        with arm.lock:
+            back = arm.relayed[-1][1]
+        R.check(sc, 'command follows the GELLO back (moving away is never limited)',
+                max(abs(x - y) for x, y in zip(back, base)) < 0.03,
+                f'max diff to start {max(abs(x - y) for x, y in zip(back, base)):.3f} rad')
+        # ---- S21 (same LIVE session): the other arm's data disappears -> FAULT, controller deactivated
+        fake.on = False
+        rc = wait_exit(p, 10)
+        with arm.lock:
+            texts = [t for _, t in arm.states]
+        R.check(sc + ' / S21', 'other arm data lost -> gate exit 3 (FAULT)', rc == 3, f'rc={rc}')
+        R.check(sc + ' / S21', 'reason names the other arm', any('joint states of the right arm lost' in t for t in texts),
+                texts[-1] if texts else '')
+        R.check(sc + ' / S21', 'controller inactive (robot holds)', arm.ctrl_state() == 'inactive')
+    else:
+        p.send_signal(signal.SIGINT)
+        wait_exit(p, 15)
+    fake.on = False
 
     # ---- S16: HOLD resync: GELLO moved during the ramp and held still elsewhere -> second ramp to it
     sc = 'S16 HOLD resync'
@@ -710,13 +877,17 @@ def run_duo(a, logdir):
         return R.summary()
     left_base = list(arms['left'].robot)
     arms['left'].set_gello(lambda t: left_base)
-    R.check(sc, 'left reaches LIVE', arms['left'].wait_state('LIVE', 90))
     arms['right'].set_gello(lambda t: SIM_HOLDER)     # right GELLO stays in its holder
+    # collision guard barrier: the left arm must WAIT for the right one (it used to go LIVE alone)
+    R.check(sc, 'left waits at the BARRIER for the right arm', arms['left'].wait_state('BARRIER', 60),
+            ' -> '.join(dict.fromkeys(arms['left'].state_names())))
     rc = wait_exit(p, 90)
     R.check(sc, 'teleop_duo.sh exits with 2 (REFUSED)', rc == 2, f'rc={rc}')
     R.check(sc, 'right REFUSED', 'REFUSED' in arms['right'].state_names())
-    R.check(sc, 'left STOPPED (deactivated)', 'STOPPED' in arms['left'].state_names(),
-            ' -> '.join(dict.fromkeys(arms['left'].state_names())))
+    left_states = list(dict.fromkeys(arms['left'].state_names()))
+    R.check(sc, 'left NEVER moved (no MOVING / LIVE) and ended REFUSED or STOPPED',
+            not {'MOVING', 'LIVE'} & set(left_states) and ({'REFUSED', 'STOPPED'} & set(left_states)),
+            ' -> '.join(left_states))
     time.sleep(2)
     R.check(sc, 'no ros2_control_node / gate left',
             subprocess.run(['pgrep', '-f', r'^/opt/ros/humble/lib/controller_manager/ros2_control_node|^(/usr/bin/)?python3 \S*gello_gate\.py']).returncode != 0)
