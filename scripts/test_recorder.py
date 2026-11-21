@@ -52,13 +52,16 @@ class Recorder(Node):
                 csv.write('wall_time,robot_mode,f_ext_n,fx,fy,fz,tau_ext_max_nm,dq_max_rads,'
                           'cmd_err_max_rad,cmd_step_max_rad,contact,collision,cmd_success_rate,'
                           + ','.join(f'q{i}' for i in range(1, 8)) + ',pos_margin_rad,pos_margin_joint,'
-                          'vel_margin_rads,vel_margin_joint\n')
-            self.motion[arm] = {'csv': csv, 'cmd': None, 'cmd_t': 0.0, 'step_max': 0.0, 't_state': None, 'mode': None,
+                          'vel_margin_rads,vel_margin_joint,'
+                          + ','.join(f'gello_q{i}' for i in range(1, 8)) + '\n')
+            self.motion[arm] = {'csv': csv, 'cmd': None, 'cmd_t': 0.0, 'gello': None, 'gello_t': 0.0, 'step_max': 0.0, 't_state': None, 'mode': None,
                                 'hist': collections.deque(maxlen=40), 'peak_t': 0.0}
             self.create_subscription(FrankaRobotState, f'/{arm}/robot_state_10hz',
                                      lambda m, a=arm: self.on_robot_state(a, m), 10)
             self.create_subscription(JointState, f'/{arm}/gello/joint_states',
                                      lambda m, a=arm: self.on_cmd(a, m), 50)
+            self.create_subscription(JointState, f'/gello_check_{arm}/gello/joint_states',
+                                     lambda m, a=arm: self.on_gello(a, m), 50)
         self.prev = {}
         self.t_status = time.monotonic()
         self.status_gap = False
@@ -134,6 +137,11 @@ class Recorder(Node):
                     self.peak(arm, f'command step {step:.3f} rad')
         mo['cmd'], mo['cmd_t'] = q, time.monotonic()
 
+    def on_gello(self, arm, m):
+        mo = self.motion[arm]
+        if len(m.position) >= 7:
+            mo['gello'], mo['gello_t'] = list(m.position[:7]), time.monotonic()
+
     def on_robot_state(self, arm, m):
         mo = self.motion[arm]
         mo['t_state'] = time.monotonic()
@@ -162,10 +170,12 @@ class Recorder(Node):
         else:
             extra = ',' * 10
         step, mo['step_max'] = mo['step_max'], 0.0
+        gq = (','.join(f'{x:.4f}' for x in mo['gello']) if mo['gello'] and time.monotonic() - mo['gello_t'] < 0.5
+              else ',' * 6)
         row = dict(f=f, tau=tau, dq=dq, err=err, step=step, contact=contact, collision=collision)
         mo['hist'].append((time.monotonic(), row))
         mo['csv'].write(f'{time.time():.3f},{mode},{f:.2f},{w.x:.2f},{w.y:.2f},{w.z:.2f},{tau:.2f},{dq:.3f},'
-                        f'{err:.4f},{step:.4f},{contact},{collision},{m.control_command_success_rate:.3f},{extra}\n')
+                        f'{err:.4f},{step:.4f},{contact},{collision},{m.control_command_success_rate:.3f},{extra},{gq}\n')
         if f > self.force_warn:
             self.peak(arm, f'|F_ext| {f:.1f} N (tau_ext {tau:.1f} Nm, dq {dq:.2f} rad/s, cmd err {err:.3f} rad)')
         if mode == 'REFLEX' and mo['mode'] != 'REFLEX':

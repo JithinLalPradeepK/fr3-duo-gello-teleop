@@ -24,11 +24,16 @@ show a demo ERROR state (F5/F6/F7 = pedal START/STOP/HOME, F10 = drop a camera, 
 | Kind | Name | Type | Meaning |
 |---|---|---|---|
 | service | `/demo/start`, `/demo/stop`, `/demo/home`, `/demo/recover`, `/demo/bringup`, `/demo/shutdown` | `std_srvs/Trigger` | Demo commands; `message` = reason if refused |
+| service | `/demo/stop_home` (pedal 2), `/demo/reset` (pedal 3) | `std_srvs/Trigger` | `stop_home`: STOP at once, a stopped teleop is followed by HOME after 1 s. `reset`: stop, clear errors (Desk prepare / error recovery / arm restart / bring up), HOME, ready again; refused while an emergency stop is pressed; STOP aborts it |
 | service | `/demo/gripper/<left\|right>/<open\|close>` | `std_srvs/Trigger` | Gripper buttons |
 | service | `/demo/desk/<prepare\|park\|unlock\|lock\|execution\|programming\|fci_on\|fci_off>` | `std_srvs/Trigger` | Franka Desk (desk_agent.py) |
 | topic | `/demo/status` | `std_msgs/String` (JSON, latched) | Full demo state (see `status_dict()` in `demo_supervisor.py`) |
 | topic | `/demo/desk/status` | `std_msgs/String` (JSON, latched) | Desk state per arm |
 | topic | `/demo/pedal/status` | `std_msgs/String` (JSON, 1 Hz) | Pedal heartbeat |
+| topic | `/demo/pedal/hold` | `std_msgs/String` (JSON, ~10 Hz while a pedal is held) | `{"pedal": "start"\|"reset"\|null, "progress": 0..1, "hold_s": 3.0, "fired": bool}` - START (pedal 1) and RESET (pedal 3) fire after a 3 s hold; **GUI TODO: show a progress ring/bar while `pedal` is not null** (null = released or cancelled). pedal 2 (stop_home) is immediate and never appears here |
+| status field | `/demo/status` -> `reset` | step name (`stop`, `desk`, `bringup`, `recover`, `home`) / `null` | the RESET macro is running (show "resetting ...") |
+| status field | `/demo/status` -> `arming` | `"start"` / `null` | the gates are pre-warmed because the pedal is being held (state is still IDLE) |
+| status text | gate states in `/demo/status` -> `arms.<arm>.gate` | string | new states: `ARMED` (standby), `BARRIER` (waiting for the other arm / collision check), `LIVE: limited by the collision guard (...)`, `RESYNC` |
 | topic | `/zed/zed_node/rgb/color/rect/image/compressed`, `/camera/d405_1/color/image_raw/compressed`, `/camera/d405_2/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | Camera streams (JPEG, decode with `QImage.fromData`) |
 
 ## Rules

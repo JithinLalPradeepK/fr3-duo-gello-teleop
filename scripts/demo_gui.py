@@ -1345,7 +1345,7 @@ class OperatorPage(QWidget):
 
     # -- cards (grid cells)
     def build_testing(self):
-        c, cv = card('TESTING STAGE', 'pedals: 1 START · 2 STOP · 3 HOME')
+        c, cv = card('TESTING STAGE', 'pedals: 1 START (hold 3 s) · 2 STOP, then HOME · 3 RESET')
         row = QHBoxLayout()
         row.setSpacing(12)
         self.b_start = self.button('START', 'start', big=True)
@@ -1382,7 +1382,7 @@ class OperatorPage(QWidget):
         cv.addSpacing(6)
         cv.addWidget(label('After a robot reflex or an E-stop: release the E-stop, then press ERROR RECOVERY. '
                            'If the arm stack stopped, it is restarted (grippers, GELLO and cameras keep running, '
-                           'the robots do not move). SHUT DOWN + BRING UP restarts everything.', 'subline',
+                           'the robots do not move). SHUT DOWN + BRING UP (System) restarts everything.', 'subline',
                            wrap=True))
         self.b_recover = self.button('ERROR RECOVERY', 'recover')
         cv.addWidget(self.b_recover)

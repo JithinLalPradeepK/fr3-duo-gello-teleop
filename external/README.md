@@ -11,3 +11,7 @@ Copies of things that live outside this repo on the demo machine, so the setup c
 
 `config/franka_gello_duo_check.yaml` must stay in sync with the patched `franka_gello_duo.yaml`
 (only the namespaces differ).
+
+`fr3_duo_home/home_poses.txt` was made MIRROR-SYMMETRIC on 2026-11-21 with `scripts/make_mirrored_home.py` (average of the
+saved poses; the Duo's arms are mirror images, q_left = (-q1, q2, -q3, q4, -q5, q6, -q7) * q_right). The previous values
+are kept next to the working copy as `home_poses.txt.<date>.bak` on the demo machine.

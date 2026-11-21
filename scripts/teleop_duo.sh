@@ -119,7 +119,11 @@ fi
 for a in "${ARM_LIST[@]}"; do
   log "starting gate $a"
   # shellcheck disable=SC2086
-  python3 "$DEMO/scripts/gello_gate.py" --arm "$a" $GATE_ARGS > >(tee -i -a "$LOGDIR/gate_$a.log") 2>&1 &   # -i: Ctrl-C must not kill the log
+  OTHER_ARGS=()
+  if [[ ${#ARM_LIST[@]} == 2 ]]; then          # both arms: duo collision guard (arm vs arm)
+    if [[ $a == left ]]; then OTHER_ARGS=(--other-arm right); else OTHER_ARGS=(--other-arm left); fi
+  fi
+  python3 "$DEMO/scripts/gello_gate.py" --arm "$a" "${OTHER_ARGS[@]}" $GATE_ARGS > >(tee -i -a "$LOGDIR/gate_$a.log") 2>&1 &   # -i: Ctrl-C must not kill the log
   GATE_PID[$a]=$!
 done
 
