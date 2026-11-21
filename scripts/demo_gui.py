@@ -1039,9 +1039,9 @@ class LivePage(QWidget):
     header (logo, title, tabs), ROBO STATUS sidebar (slides out, closed by default) and a 2 x 2 camera grid:
         Head Cam - RGB | Head Cam - Depth
         Hand Cam - Left (+ depth inset) | Hand Cam - Right (+ depth inset)"""
-    SIDE_W = 400
+    SIDE_W = 350                          # narrower sidebar -> bigger cameras while the status is open
     GAP = 8                               # small gap between the camera pictures
-    MARGIN = 16                           # page margin / spacing between header and body
+    MARGIN = 10                           # small side margin
     go_home = pyqtSignal()
     go_operator = pyqtSignal()
 
@@ -1059,7 +1059,7 @@ class LivePage(QWidget):
         self.hub = hub
         root = QVBoxLayout(self)
         root.setContentsMargins(self.MARGIN, 6, self.MARGIN, 6)      # small top / bottom margin (cameras get the height)
-        root.setSpacing(8)
+        root.setSpacing(6)
         self.side_w, self.status_open = 0, False
 
         # ---- header bar (76 px): logo + title left, tabs + controls right
@@ -1112,8 +1112,8 @@ class LivePage(QWidget):
         self.panel.setFixedWidth(1)
         self.panel.hide()                                  # closed by default (visitors don't see it)
         sv = QVBoxLayout(self.panel)
-        sv.setContentsMargins(20, 16, 20, 16)
-        sv.setSpacing(12)
+        sv.setContentsMargins(12, 10, 12, 10)
+        sv.setSpacing(8)
         top = QHBoxLayout()
         top.addWidget(label('ROBO STATUS', 'cardTitle'))
         top.addStretch(1)
