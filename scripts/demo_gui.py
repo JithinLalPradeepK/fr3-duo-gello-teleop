@@ -493,7 +493,7 @@ class ImageView(QWidget):
         super().__init__()
         self.pm, self.text, self.rounded, self.framed, self.icon = None, '', rounded, framed, icon
         self.loading, self.phase, self.badge, self.badge_r = False, 0.0, '', ''
-        self.badge_variant, self.white_border = 'ok', False
+        self.badge_variant, self.white_border, self.fill = 'ok', False, False   # fill: crop to fill (insets)
         self.valign = 'center'                   # 'bottom': picture sits on the bottom edge (FR3 Duo in the sidebar)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setMinimumSize(120, 90)
@@ -547,7 +547,7 @@ class ImageView(QWidget):
             p.fillPath(path, QColor(c['camera_bg']))
             p.setClipPath(path)
         if self.pm and not self.pm.isNull():
-            sz = self.pm.size().scaled(r.size().toSize(), Qt.KeepAspectRatio)
+            sz = self.pm.size().scaled(r.size().toSize(), Qt.KeepAspectRatioByExpanding if self.fill else Qt.KeepAspectRatio)
             y = r.bottom() - sz.height() if self.valign == 'bottom' else r.top() + (r.height() - sz.height()) / 2
             p.drawPixmap(QRectF(r.left() + (r.width() - sz.width()) / 2, y, sz.width(), sz.height()), self.pm,
                          QRectF(self.pm.rect()))
@@ -848,19 +848,20 @@ class HomePage(QWidget):
 
 
 class PipView(ImageView):
-    """Main camera picture with the depth inset (spec 5.9: 32 % of the tile, 16:10, 3 px white frame, 14 px from the
+    """Main camera picture with the depth inset (spec 5.9: 32 % of the tile, 16:9, no frame, 14 px from the
     bottom-right corner)."""
 
     def __init__(self):
         super().__init__(icon=True)
         self.inset = ImageView(icon=True)
-        self.inset.white_border = True
+        self.inset.white_border = False          # no white frame around the depth inset
+        self.inset.fill = True                   # picture fills the inset to its edge (no hairline)
         self.inset.setParent(self)
         self.inset.setMinimumSize(60, 34)
 
     def resizeEvent(self, e):
         w = max(90, int(self.width() * 0.32))
-        h = int(w * 10 / 16)
+        h = int(w * 9 / 16)                      # 16:9 like the camera pictures: no bars around the picture
         m = 14
         self.inset.setGeometry(self.width() - w - m, self.height() - h - m, w, h)
         super().resizeEvent(e)
