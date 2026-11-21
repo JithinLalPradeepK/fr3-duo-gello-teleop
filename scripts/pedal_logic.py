@@ -8,19 +8,37 @@ before the same command can fire again (holding does not repeat the command).
 Safety against a stuck / lost key-up: if the pedal delivers auto-repeat events while held (keyboard-style repeat, value 2),
 they act as a heartbeat - when they stop for `repeat_gap` seconds without a key-up, the hold is cancelled.
 If the pedal never repeats, the hold relies on the key-up event alone.
+
+PULSE pedals (found 2026-11-21: ElfKey sends F12 as a 0.02 s press-release, so a hold can never be measured): such a key
+is passed with pulse=True and uses TAP-TO-CONFIRM instead - the first tap arms the command ("press again to confirm"),
+a second tap between `confirm_min` and `confirm_window` seconds later fires it, otherwise it times out.
 """
 
 
 class HoldLogic:
-    def __init__(self, holds, repeat_gap=0.6, progress_every=0.1):
+    def __init__(self, holds, repeat_gap=0.6, progress_every=0.1, confirm_window=5.0, confirm_min=0.5):
+        self.confirm_window, self.confirm_min = confirm_window, confirm_min
+        self.armed = None                   # (cmd, t) of a pulse pedal waiting for its confirming second tap
         self.holds = dict(holds)            # cmd -> seconds (0 = immediate)
         self.repeat_gap = repeat_gap
         self.progress_every = progress_every
         self.cur = None                     # active hold: dict(cmd, t0, last, repeats, fired, last_progress)
 
-    def on_key(self, cmd, value, now):
+    def on_key(self, cmd, value, now, pulse=False):
         """value: 1 = key-down, 2 = auto-repeat, 0 = key-up. Returns a list of actions."""
         acts = []
+        if pulse:                           # tap-to-confirm; key-up / repeats of a pulse key carry no information
+            if value != 1:
+                return acts
+            if self.holds.get(cmd, 0.0) <= 0.0:
+                return [('fire', cmd)]
+            if self.armed and self.armed[0] == cmd and self.confirm_min <= now - self.armed[1] <= self.confirm_window:
+                self.armed = None
+                return [('progress', cmd, 1.0), ('fire', cmd), ('done', cmd)]
+            if self.armed and self.armed[0] == cmd and now - self.armed[1] < self.confirm_min:
+                return acts                 # bounce of the first tap
+            self.armed = (cmd, now)
+            return [('progress', cmd, 0.5), ('armed', cmd)]
         if value == 1:
             if self.cur and not self.cur['fired'] and self.cur['cmd'] != cmd:
                 acts.append(('cancel', self.cur['cmd'], 'another pedal pressed'))
@@ -45,6 +63,10 @@ class HoldLogic:
 
     def tick(self, now):
         acts = []
+        if self.armed and now - self.armed[1] > self.confirm_window:
+            acts.append(('cancel', self.armed[0], 'not confirmed by a second tap'))
+            acts.append(('done', self.armed[0]))
+            self.armed = None
         c = self.cur
         if not c:
             return acts

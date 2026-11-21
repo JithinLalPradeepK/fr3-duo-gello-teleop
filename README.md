@@ -29,7 +29,8 @@ and a PyQt5 GUI on two monitors. It runs as one ROS 2 Humble system on one Ubunt
 - Pedals (since 2026-11-21):
   1. **START**: hold 3 s (releasing earlier cancels). While held, the gates are pre-warmed so LIVE follows quickly.
   2. **STOP + HOME**: acts at once. A stopped teleop is followed by HOME after 1 s; pressed while HOMING it only aborts.
-  3. **RESET**: hold 3 s. Stops, clears errors (Franka Desk prepare, error recovery / arm restart, bring up, as needed),
+  3. **RESET** (pedal 3 sends F12 as a 0.02 s pulse, so it needs a **double tap within 5 s**; after reprogramming it in ElfKey to
+     a held letter key such as C it is a normal 3 s hold): stops, clears errors (Franka Desk prepare, error recovery / arm restart, bring up, as needed),
      moves both arms HOME and makes the demo ready again. Refused while an emergency stop is still pressed.
   Services: `/demo/start`, `/demo/stop_home`, `/demo/reset` (plus `/demo/stop`, `/demo/home` for the GUI buttons).
 

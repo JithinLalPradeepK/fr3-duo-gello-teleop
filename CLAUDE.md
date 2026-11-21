@@ -345,4 +345,9 @@ same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_to
   gate (catch-up), pedal (mapping + raw log), pedal_probe.py, tests T6f-T6j + T9 (HOME in two phases), S25 (catch-up),
   S16 now uses a 0.8 rad offset, geometry G-6 (planner).
 - NEXT: close the demo, run the three sim suites, then hardware: START (catch-up), pedal 2, pedal 3 after an E-stop/reflex.
+- PEDAL PROBE RESULT (2026-11-21, scripts/pedal_probe.py): pedal 1 KEY_A held 6.86 s / 195 repeats, pedal 2 KEY_B 6.63 s /
+  188 repeats, pedal 3 KEY_F12 = PULSE (0.02 s, 0 repeats). => RESET on pedal 3 uses TAP-TO-CONFIRM (tap, tap again within
+  5 s; HoldLogic pulse=True, demo_pedal --pulse-keys KEY_F12). KEY_C=reset is also mapped as a normal 3 s hold: reprogram
+  pedal 3 in ElfKey (~/Downloads/SetupElfKey-3.2.1-linux-amd64.tar, ~/elfkey) to letter C in hold mode and the double tap is
+  no longer needed. pedal_logic_test now 23 checks (P8 pulse).
 

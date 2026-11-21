@@ -86,5 +86,34 @@ prog = [a[2] for _, a in out if a[0] == 'progress']
 check('progress goes 0 -> 1 monotonically', prog and prog[0] == 0.0 and prog[-1] == 1.0 and prog == sorted(prog),
       f'{len(prog)} reports, first {prog[:3]}, last {prog[-2:]}')
 
+print('== P8 pulse pedal (F12): tap-to-confirm')
+def run_pulse(taps, end, **kw):
+    lg = HoldLogic({'reset': 3.0}, **kw)
+    out, t = [], 0.0
+    taps = sorted(taps)
+    i = 0
+    while t <= end + 1e-9:
+        while i < len(taps) and taps[i] <= t + 1e-9:
+            for key_ev in (1, 0):                         # the pedal sends down + up immediately
+                out += [(round(t, 2), a) for a in lg.on_key('reset', key_ev, t, pulse=True)]
+            i += 1
+        out += [(round(t, 2), a) for a in lg.tick(t)]
+        t += 0.02
+    return out
+out = run_pulse([1.0], 10.0)
+check('one tap only arms (nothing fires) and times out after 5 s', not fires(out) and any(a[0] == 'armed' for _, a in out)
+      and any(a[0] == 'cancel' and 'second tap' in a[2] for _, a in out), str([a for _, a in out if a[0] in ('armed', 'fire', 'cancel')]))
+out = run_pulse([1.0, 2.5], 6.0)
+check('two taps 1.5 s apart fire RESET once', fires(out) == [(2.5, 'reset')], str(fires(out)))
+out = run_pulse([1.0, 1.2], 6.0)
+check('a bounce (second tap after 0.2 s) does NOT fire', not fires(out), str(fires(out)))
+out = run_pulse([1.0, 7.5], 9.0)
+check('second tap after the 5 s window only re-arms', not fires(out), str(fires(out)))
+out = run_pulse([1.0, 2.0, 3.0], 6.0)
+check('third tap after a fire arms again (never fires twice by itself)', fires(out) == [(2.0, 'reset')], str(fires(out)))
+lg = HoldLogic({'reset': 3.0})
+check('key-up / repeat events of a pulse key are ignored', lg.on_key('reset', 0, 0.0, pulse=True) == []
+      and lg.on_key('reset', 2, 0.1, pulse=True) == [])
+
 print(f'===== {"PASS" if not fails else "FAIL: " + str(fails)}')
 sys.exit(1 if fails else 0)

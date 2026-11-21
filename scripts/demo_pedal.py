@@ -7,7 +7,10 @@
 POWBORO FS2020 (PCsensor 3553:b001), programmed with ElfKey as a keyboard (mapping changed 2026-11-21):
   pedal 1 = KEY_A   -> /demo/start      START (3 s hold)
   pedal 2 = KEY_B   -> /demo/stop_home  STOP at once; a stopped teleop is followed by HOME (pressed while HOMING: abort)
-  pedal 3 = KEY_F12 -> /demo/reset      RESET (3 s hold): stop, clear errors, HOME, ready again
+  pedal 3 = KEY_F12 -> /demo/reset      RESET: stop, clear errors, HOME, ready again
+    F12 is a PULSE key (ElfKey sends press+release within 0.02 s, probe 2026-11-21), so a hold cannot be measured:
+    it uses TAP-TO-CONFIRM (tap, then tap again within 5 s). Reprogram pedal 3 in ElfKey to a held letter key (KEY_C is
+    already mapped to reset, as a normal 3 s hold) and the double tap is no longer needed.
 - The pedal is GRABBED exclusively: its keystrokes never reach other windows or desktop shortcuts.
 - LONG PRESS (decision 2026-11-21): START and HOME fire only after the pedal has been held for --hold seconds
   (default 3.0); releasing earlier cancels. STOP stays immediate (--stop-hold 0): it must never be delayed.
@@ -39,7 +42,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pedal_logic import HoldLogic  # noqa: E402
 
 DEVICE = '/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd'
-DEFAULT_MAP = 'KEY_A=start,KEY_B=stop_home,KEY_F12=reset'
+DEFAULT_MAP = 'KEY_A=start,KEY_B=stop_home,KEY_C=reset,KEY_F12=reset'
+DEFAULT_PULSE = 'KEY_F12'
 
 
 class Pedal(Node):
@@ -56,6 +60,7 @@ class Pedal(Node):
         self.logic = HoldLogic({cmd: (a.stop_hold if cmd in ('stop', 'stop_home') else a.hold)
                                 for cmd in set(self.keymap.values())})
         self.down_t = {}                                 # raw key-down times (diagnostics)
+        self.pulse_codes = {evdev.ecodes.ecodes[k.strip()] for k in a.pulse_keys.split(',') if k.strip()}
         self.dev = None
         self.last_press = {}
         self.last_event = ''
@@ -92,6 +97,8 @@ class Pedal(Node):
                 self.press(a[1])
             elif a[0] == 'progress':
                 self.hold_msg(a[1], a[2], a[2] >= 1.0)
+            elif a[0] == 'armed':
+                self.get_logger().info(f'pedal {a[1].upper()} armed - tap again within {self.logic.confirm_window:.0f} s to confirm')
             elif a[0] == 'cancel':
                 self.get_logger().info(f'pedal {a[1].upper()} hold cancelled ({a[2]})')
                 self.hold_msg(None, 0.0)
@@ -138,7 +145,8 @@ class Pedal(Node):
                     for ev in self.dev.read():
                         if ev.type == evdev.ecodes.EV_KEY and ev.value in (0, 1, 2) and ev.code in self.keymap:
                             self.raw_log(ev)
-                            self.act(self.logic.on_key(self.keymap[ev.code], ev.value, time.monotonic()))
+                            self.act(self.logic.on_key(self.keymap[ev.code], ev.value, time.monotonic(),
+                                                       pulse=ev.code in self.pulse_codes))
                 self.act(self.logic.tick(time.monotonic()))
             except OSError as e:
                 self.disconnect(e)
@@ -153,6 +161,8 @@ def main():
     ap.add_argument('--device', default=DEVICE)
     ap.add_argument('--map', default=DEFAULT_MAP, help=f'default {DEFAULT_MAP}')
     ap.add_argument('--debounce', type=float, default=0.3, help='START/HOME only (s)')
+    ap.add_argument('--pulse-keys', default=DEFAULT_PULSE,
+                    help='keys that only send a quick press-release (no hold possible): tap-to-confirm instead of a hold')
     ap.add_argument('--hold', type=float, default=3.0, help='START/HOME: hold the pedal this long (s)')
     ap.add_argument('--stop-hold', type=float, default=0.0, help='STOP: 0 = immediate (never delay a stop)')
     a = ap.parse_args(rclpy.utilities.remove_ros_args(sys.argv)[1:])
