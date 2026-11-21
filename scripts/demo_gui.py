@@ -56,9 +56,17 @@ ARM_IP = {'left': '192.168.1.51', 'right': '192.168.1.50'}
 # >>> DEPTH: Jithin adds the depth topic here (a sensor_msgs/CompressedImage that QImage can decode, e.g. a
 # >>> colourised depth PNG/JPEG). None = the DEPTH view shows "not available yet". Nothing else needs to change.
 # >>> WRISTS: d405_1 = LEFT wrist, d405_2 = RIGHT wrist is an ASSUMPTION - swap the two titles if it is the other way.
-CAMERAS = [('ZED Mini · Overview', 'zed', '/zed/zed_node/rgb/color/rect/image/compressed', None),
-           ('Left wrist · D405 #1', 'd405_1', '/camera/d405_1/color/image_raw/compressed', None),
-           ('Right wrist · D405 #2', 'd405_2', '/camera/d405_2/color/image_raw/compressed', None)]
+# DEPTH topics (2026-11-21): colourised JPEG (near = red, far = blue) made by scripts/depth_view.py, started by
+# launch/cameras.launch.py - one per camera, reading the raw depth only while the GUI is subscribed.
+CAMERAS = [('ZED Mini · Overview', 'zed', '/zed/zed_node/rgb/color/rect/image/compressed',
+            '/zed/zed_node/depth_view/compressed'),
+           ('Left wrist · D405 #1', 'd405_1', '/camera/d405_1/color/image_raw/compressed',
+            '/camera/d405_1/depth_view/compressed'),
+           ('Right wrist · D405 #2', 'd405_2', '/camera/d405_2/color/image_raw/compressed',
+            '/camera/d405_2/depth_view/compressed')]
+# Cameras whose picture is shown rotated by 180 degrees (both D405 wrist cameras are mounted upside down). Applies to the
+# RGB and the DEPTH picture of that camera. Change with --invert (e.g. --invert d405_1,d405_2,zed or --invert "").
+INVERT = {'d405_1', 'd405_2'}
 CAM_TITLE = {key: title for title, key, _, _ in CAMERAS}
 TELEOP_STATES = ('TELEOP_STARTING', 'TELEOP')
 HEADLINE = 'Move your hands.\nTwo robots follow.'
@@ -818,6 +826,8 @@ class Decoder(QObject):
                 img = reader.read()
                 if img.isNull():
                     continue
+                if key in INVERT:
+                    img = img.mirrored(True, True)         # horizontal + vertical mirror = rotated by 180 degrees
                 self.shown[sk] = ('img', data)
                 self.frame.emit(key, mode, QPixmap.fromImage(img))
 
@@ -1157,6 +1167,13 @@ class LivePage(QWidget):
         body.addWidget(gw, 1)
         root.addLayout(body, 1)
         self.restyle()
+
+    def minimumSizeHint(self):
+        """The tiles are set to fixed sizes by fit_tiles() on every resize, and those fixed sizes used to become this
+        page's minimum: the window's stacked layout takes the LARGEST minimum of all pages, so the window grew to
+        1173 px on a 1080 px screen (top not covered, bottom of the wrist tiles cut). The page can shrink: it
+        re-fits its tiles to whatever size it gets."""
+        return QSize(900, 420)
 
     def set_status_open(self, on):
         """Slide the ROBO STATUS sidebar in / out; the cameras grow to fill the freed width."""
@@ -1897,9 +1914,14 @@ def main():
                     help='started by start_demo.sh: closing a window asks, then shuts the demo down')
     ap.add_argument('--preview', action='store_true',
                     help='design preview with demo data; never sends anything (own ROS domain 199)')
+    ap.add_argument('--invert', default=','.join(sorted(INVERT)),
+                    help='cameras shown rotated by 180 degrees (RGB and depth), comma separated keys: zed,d405_1,d405_2 '
+                         '(default: the two wrist cameras; "" = none)')
     ap.add_argument('--force-two', action='store_true', help=argparse.SUPPRESS)      # test: two windows, one screen
     ap.add_argument('--screenshot', metavar='DIR', help=argparse.SUPPRESS)       # offscreen design check
     a = ap.parse_args(rclpy.utilities.remove_ros_args(sys.argv)[1:])
+    INVERT.clear()
+    INVERT.update(k.strip() for k in a.invert.split(',') if k.strip())
     if a.preview:
         if a.owns_demo:
             sys.exit('--preview cannot own the demo')

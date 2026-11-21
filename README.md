@@ -51,6 +51,7 @@ Details: [docs/supervisor_design.md](docs/supervisor_design.md).
 | `scripts/gello_align.py`, `scripts/record_gello_holder.py` | Calibration helpers (GELLO vs. robot diff, holder pose recording). |
 | `scripts/test_recorder.py` | Read-only event recorder for test sessions. |
 | `launch/` | `arms_gated`, `gello_check`, `cameras` launch files. |
+| `scripts/depth_view.py` | Depth camera -> colourised JPEG for the GUI (near red, far blue); one per camera, started by `cameras.launch.py`, lazy. |
 | `config/` | GELLO publisher config (isolated namespaces), holder poses, fake-hardware robot config. |
 | `env/host_env.sh` | Sources all workspaces in the right order. |
 | `test/` | Simulation tests (fake hardware, separate ROS domain). |
@@ -160,6 +161,8 @@ test/sim_supervisor_test.sh        # supervisor state machine (incl. pedal hold 
 test/sim_gui_test.sh               # GUI + supervisor end to end (offscreen)
 python3 test/geometry_test.py      # Duo kinematics, capsule distances, path check (numpy only)
 python3 test/pedal_logic_test.py   # pedal long-press logic (simulated time)
+python3 test/depth_view_test.py    # depth -> colour JPEG converter
+python3 test/gui_camera_test.py    # GUI: depth topics, D405 180-degree flip, window stays screen sized
 ```
 
 ## Working on the GUI without robots

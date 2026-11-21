@@ -55,7 +55,7 @@ Source files: HumanoidFR3 `assets/logos/`. Montserrat fonts are in the repo. Mis
 Paths are now relative to the repo (no more hard-coded `~/robot_demo`).
 
 ## TODO / hooks for you
-1. **Depth view**: add the depth topic as the 4th field of the `CAMERAS` list at the top of `demo_gui.py`
+1. **Depth view - DONE 2026-11-21** (depth topics are set in `CAMERAS`; see docs/GUI_DEVELOPMENT.md). Was: add the depth topic as the 4th field of the `CAMERAS` list at the top of `demo_gui.py`
    (a `sensor_msgs/CompressedImage` that `QImage` can decode, e.g. colourised depth). `None` = "not available yet". Nothing else to change.
 2. Confirm which D405 is the left / right wrist camera (assumed d405_1 = left, d405_2 = right).
    Picture-in-picture is verified only with FAKE depth frames in `--preview` (F11 toggles depth available / not);

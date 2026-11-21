@@ -4,20 +4,35 @@ Topics (color, compressed):
   /zed/zed_node/rgb/color/rect/image/compressed
   /camera/d405_1/color/image_raw/compressed
   /camera/d405_2/color/image_raw/compressed
+Topics (depth, colourised JPEG for the GUI; near = red, far = blue; made by scripts/depth_view.py, lazy: the raw depth is
+only read while somebody subscribes):
+  /zed/zed_node/depth_view/compressed
+  /camera/d405_1/depth_view/compressed
+  /camera/d405_2/depth_view/compressed
 
   ros2 launch ~/robot_demo/launch/cameras.launch.py [enable_zed:=false] [d405_depth:=false]
 """
 import os
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
 from launch.conditions import IfCondition
+from launch.substitutions import PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
 D405 = {'d405_1': '_262622274776', 'd405_2': '_262422272263'}
 PROFILE = '848x480x30'
+DEPTH_VIEW = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'depth_view.py')
+# colour range of the depth pictures [m] (red = nearest, blue = farthest): D405 works at 7 cm - 1 m, ZED Mini 0.3 - 3 m
+D405_RANGE, ZED_RANGE = (0.10, 1.00), (0.30, 3.00)
+
+
+def depth_view(raw, out, rng, condition):
+    return ExecuteProcess(cmd=[sys.executable, DEPTH_VIEW, '--input', raw, '--output', out,
+                               '--min', str(rng[0]), '--max', str(rng[1])], output='screen', condition=condition)
 
 
 def generate_launch_description():
@@ -51,4 +66,10 @@ def generate_launch_description():
                 'depth_module.color_profile': PROFILE,
             }.items(),
             condition=IfCondition(LaunchConfiguration('enable_' + name))))
+        ld.add_action(depth_view(
+            f'/camera/{name}/depth/image_rect_raw', f'/camera/{name}/depth_view/compressed', D405_RANGE,
+            IfCondition(PythonExpression(
+                ["'", LaunchConfiguration('enable_' + name), "' == 'true' and '", depth, "' == 'true'"]))))
+    ld.add_action(depth_view('/zed/zed_node/depth/depth_registered', '/zed/zed_node/depth_view/compressed', ZED_RANGE,
+                             IfCondition(LaunchConfiguration('enable_zed'))))
     return ld

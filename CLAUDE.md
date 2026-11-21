@@ -370,3 +370,29 @@ same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_to
 - NOT bugs: right-arm cartesian_reflex 17:12:51 (arms pressed on each other, 15-19 N for 40 s, guard off in teleop by user
   decision); right REFLEX at bring-up 17:07:28 = leftover of the earlier reflex (RESET clears it).
 
+## CAMERA / GUI CHANGES 2026-11-21 (18:00-18:40; user request)
+- D405 wrist cameras are upside down: GUI rotates both D405 pictures (RGB + depth) by 180 degrees (demo_gui.INVERT, --invert).
+  ASSUMPTION: "both Depth cameras" = the two D405 (RealSense Depth Camera 405), not the ZED.
+- Depth feeds: scripts/depth_view.py (raw 16UC1 mm / 32FC1 m -> colourised JPEG, turbo map trimmed to its bright middle, near red,
+  far blue, black = no data; shrinks first; 10 fps; LAZY: reads the camera only while somebody subscribes). Started per camera by
+  launch/cameras.launch.py: /camera/d405_{1,2}/depth_view/compressed (range 0.10-1.00 m), /zed/zed_node/depth_view/compressed
+  (0.30-3.00 m). demo_gui.CAMERAS 4th field = these topics (GUI depth slots: DEPTH main view, picture-in-picture, head-cam depth).
+  Measured on the real cameras: ~10 Hz, 22-29 kB/frame, converter CPU 17 % / 20 % / 64 % of one core (ZED 1920x1080 float depth
+  is 8 MB x 28 Hz; shrink the ZED publish size with pub_resolution CUSTOM + pub_downscale_factor in a zed params override if
+  ever needed - NOT done, it would also shrink the ZED RGB). D405 #1 still ~10 Hz (USB 2.1 link, known; its profile 848x480x30
+  is rejected at start - harmless).
+- WINDOW SIZE BUG (operator display): LivePage tiles have fixed sizes -> LivePage minimum 1078 px; the MainWindow stack takes the
+  max minimum of all pages -> control window 1173 px high on a 1080 px screen (top not covered, wrist tiles cut at the bottom).
+  FIX: LivePage.minimumSizeHint() = 900x420 (the page re-fits its tiles on resize). test/gui_camera_test.py: window 1920x1080 on
+  all pages, both roles, lowest tile bottom 1072.
+- Tests: test/depth_view_test.py (11), test/gui_camera_test.py (21). The 3 cameras were started only to check topics / rates / CPU
+  (sensors, no robot). One USB dropout of a D405 (ENODEV) happened at the first test launch and did not recur.
+- NOTE for Akshay (GUI owner): demo_gui.py was changed here (CAMERAS depth topics, INVERT + Decoder flip, LivePage.minimumSizeHint,
+  --invert): merge before more GUI work.
+- INCIDENT (my mistake, 18:26:30): I started `cameras.launch.py` for tests WITHOUT checking whether the user's demo was running
+  (it had been started 18:01 and had its own cameras). The two launches fought over the USB cameras: the demo's d405_2 node died
+  ("xioctl(VIDIOC_S_FMT) ... errno=16 Device or resource busy", exit -11) and at 18:26:49 the supervisor logged "cameras stopped -
+  arms unaffected". Robots/grippers unaffected; the demo's camera feeds stayed dead until SHUT DOWN + BRING UP. RULE: before ANY
+  command that opens hardware (cameras, grippers, pedal, GELLO) check `pgrep -af "start_demo|demo_supervisor|realsense2|zed"` first.
+- NOT YET RUN after these GUI/camera changes: test/sim_gui_test.sh (refuses while a demo runs) - run it once the demo is closed.
+

@@ -35,6 +35,7 @@ show a demo ERROR state (F5/F6/F7 = pedal START/STOP/HOME, F10 = drop a camera, 
 | status field | `/demo/status` -> `arming` | `"start"` / `null` | the gates are pre-warmed because the pedal is being held (state is still IDLE) |
 | status text | gate states in `/demo/status` -> `arms.<arm>.gate` | string | new states: `ARMED` (standby), `BARRIER` (waiting for the other arm / collision check), `LIVE: limited by the collision guard (...)`, `RESYNC` |
 | topic | `/zed/zed_node/rgb/color/rect/image/compressed`, `/camera/d405_1/color/image_raw/compressed`, `/camera/d405_2/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | Camera streams (JPEG, decode with `QImage.fromData`) |
+| topic | `/zed/zed_node/depth_view/compressed`, `/camera/d405_1/depth_view/compressed`, `/camera/d405_2/depth_view/compressed` | `sensor_msgs/CompressedImage` | **Depth feeds (2026-11-21)**: colourised JPEG, near = red, far = blue, no data = black, ~10 fps, 480 px wide. Made by `scripts/depth_view.py` (started by `launch/cameras.launch.py`); it only reads the raw depth while the GUI is subscribed. Already wired into `CAMERAS` (4th field) |
 
 ## Rules
 
@@ -48,3 +49,13 @@ show a demo ERROR state (F5/F6/F7 = pedal START/STOP/HOME, F10 = drop a camera, 
 
 Work on a branch (e.g. `gui/<topic>`) and open a pull request into `main`. Demo/supervisor fixes go
 on separate branches. Changes to the files above should get a review from the supervisor side.
+
+## Camera feed orientation and window size (2026-11-21)
+- **Both D405 wrist cameras are mounted upside down**: their RGB *and* depth pictures are shown rotated by 180 degrees
+  (`INVERT` in `demo_gui.py`, `--invert d405_1,d405_2,zed` / `--invert ""` on the command line). The flip is done once in the
+  `Decoder`, so every window shows the same orientation.
+- **The window must stay screen sized.** `LivePage.minimumSizeHint()` returns a small size on purpose: `fit_tiles()` sets
+  FIXED tile sizes, which used to become the page's minimum, and the window's stacked layout takes the largest minimum of
+  all pages - the control window grew to 1173 px on a 1080 px screen (top not covered, bottom of the wrist tiles cut).
+  `python3 test/gui_camera_test.py` checks the window size on every page for both roles.
+
