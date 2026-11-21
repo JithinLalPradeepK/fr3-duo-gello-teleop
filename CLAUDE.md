@@ -214,7 +214,9 @@ GUI REDESIGN (2026-11-21, branch features/GUI-development, Akshay): demo_gui.py 
   home without buttons, navbar chips, Live camera page mirrored on 2 monitors, Operator menu, light/dark, grey buttons,
   Franka trademark in empty camera tiles). Preview-tested only. See docs/GUI_CHANGES.md and docs/HANDOFF_GUI.md.
   Later 2026-11-21: 2 displays (1 = Home/Operator -> cameras on START, 2 = cameras always), camera page layout (ZED centre,
-  wrists bottom corners, depth as picture-in-picture, slide status panel), Operator = one grid page, loading animation.
+  wrists bottom corners, depth always as picture-in-picture inset, no RGB/PiP switches; camera page without navbar: left sidebar = logo + big status
+  window + FR3 Duo picture, right = ZED on top, both wrists right below),
+  Operator = one grid page (button, no drop-down), loading animation, start full screen (FULL SCREEN button toggles).
   Depth view: add the topic to CAMERAS in demo_gui.py. PNG brand assets stay out of git (copy into assets/brand/).
 TEST SESSION 1 (2026-11-20 20:33-21:26): scripts/test_recorder.py (read-only) -> logs/test_20261120_203258/.
   Findings + suggestions S1-S11: docs/test_notes_2026-11-20.md. Key: 5 cartesian reflexes in ~5 min LIVE
