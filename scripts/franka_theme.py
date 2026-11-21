@@ -40,11 +40,11 @@ PALETTES = {
     'light': dict(bg=WHITE, fg=BLACK, muted=GREY, panel='#F3F5F5', line=OFF_WHITE, nav=WHITE,
                   chip_ok_bg=DARK_BLUE, chip_ok_fg=WHITE, chip_bad_bg=GREY_LIGHT, chip_bad_fg=GREY,
                   btn=GREY, btn_hover=DARK_BLUE, btn_checked=DARK_BLUE, btn_dis_bg=GREY_LIGHT, btn_dis_fg='#9AABB3',
-                  popup=DARK_BLUE, popup_fg=WHITE, camera_bg='#EDF0F1', row=WHITE),
+                  popup=DARK_BLUE, popup_fg=WHITE, camera_bg='#EDF0F1', row=WHITE, track='#E4E9EA'),
     'dark': dict(bg='#13222A', fg=WHITE, muted=OFF_WHITE, panel='#1B2F36', line='#2E4650', nav='#13222A',
                  chip_ok_bg='#0B151A', chip_ok_fg=WHITE, chip_bad_bg='#2A3E47', chip_bad_fg=OFF_WHITE,
                  btn=GREY, btn_hover=GREY_HOVER, btn_checked=BLACK, btn_dis_bg='#22363F', btn_dis_fg='#6F848D',
-                 popup='#0B151A', popup_fg=WHITE, camera_bg='#0E1A1E', row='#243B45'),
+                 popup='#0B151A', popup_fg=WHITE, camera_bg='#0E1A1E', row='#243B45', track='#2A3E47'),
 }
 
 

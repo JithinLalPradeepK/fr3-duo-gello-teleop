@@ -32,7 +32,7 @@ import threading
 import time
 
 import rclpy
-from PyQt5.QtCore import (QBuffer, QByteArray, QEasingCurve, QEvent, QIODevice, QObject, QPoint, QPropertyAnimation, QRectF,
+from PyQt5.QtCore import (QBuffer, QByteArray, QEasingCurve, QEvent, QIODevice, QObject, QPoint, QPointF, QPropertyAnimation, QRectF,
                           QSize, Qt, QTimer, QVariantAnimation, pyqtProperty, pyqtSignal)
 from PyQt5.QtGui import (QColor, QFont, QImage, QImageReader, QLinearGradient, QPainter, QPainterPath, QPen,
                          QPixmap)
@@ -93,6 +93,16 @@ PLAIN = {'cartesian_reflex': 'the robot stopped itself after an unexpected force
          'REFLEX': 'robot stopped itself (reflex)', 'USER_STOPPED': 'emergency stop pressed'}
 NO_SIGNAL = 'WAITING FOR CAMERA ...'
 NO_DEPTH = 'WAITING FOR DEPTH ...'
+# names on the camera tiles / status list (design spec "Teleop Control Station")
+TILE_NAME = {'zed': 'Head Cam – RGB', 'd405_1': 'Hand Cam – Left', 'd405_2': 'Hand Cam – Right'}
+INSET_NAME = {'zed': 'Head Depth', 'd405_1': 'Left Depth', 'd405_2': 'Right Depth'}
+# status variants (text colour, tint): ok / warn / off - the only three states of the design
+VARIANTS = {'light': {'ok': ('#117A3B', '#E4F5EA'), 'warn': ('#A35A00', '#FCEFD9'), 'off': ('#C62828', '#FDE8E8')},
+            'dark': {'ok': ('#6FD39A', '#1D3B2C'), 'warn': ('#F2B54A', '#3D3016'), 'off': ('#FF8A8A', '#402222')}}
+
+
+def variant_colors(v):
+    return VARIANTS[T.MODE].get(v, VARIANTS[T.MODE]['off'])
 SEVERITY = {'error': 0, 'warn': 1, 'info': 2}
 
 
@@ -483,6 +493,7 @@ class ImageView(QWidget):
         super().__init__()
         self.pm, self.text, self.rounded, self.framed, self.icon = None, '', rounded, framed, icon
         self.loading, self.phase, self.badge, self.badge_r = False, 0.0, '', ''
+        self.badge_variant, self.white_border = 'ok', False
         self.valign = 'center'                   # 'bottom': picture sits on the bottom edge (FR3 Duo in the sidebar)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setMinimumSize(120, 90)
@@ -523,26 +534,34 @@ class ImageView(QWidget):
         p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         r = QRectF(self.rect())
         small = self.width() < 330
+        radius = 10 if small else 12
+        if self.white_border:                    # picture-in-picture inset: 3 px white frame
+            outer = QPainterPath()
+            outer.addRoundedRect(r, radius, radius)
+            p.fillPath(outer, QColor(T.WHITE))
+            r = r.adjusted(3, 3, -3, -3)
+            radius -= 3
         if self.framed:
             path = QPainterPath()
-            path.addRoundedRect(r, 10 if small else 14, 10 if small else 14)
+            path.addRoundedRect(r, radius, radius)
             p.fillPath(path, QColor(c['camera_bg']))
             p.setClipPath(path)
         if self.pm and not self.pm.isNull():
-            s = self.pm.size().scaled(self.size(), Qt.KeepAspectRatio)
-            y = r.height() - s.height() if self.valign == 'bottom' else (r.height() - s.height()) / 2
-            p.drawPixmap(QRectF((r.width() - s.width()) / 2, y, s.width(), s.height()), self.pm, QRectF(self.pm.rect()))
+            sz = self.pm.size().scaled(r.size().toSize(), Qt.KeepAspectRatio)
+            y = r.bottom() - sz.height() if self.valign == 'bottom' else r.top() + (r.height() - sz.height()) / 2
+            p.drawPixmap(QRectF(r.left() + (r.width() - sz.width()) / 2, y, sz.width(), sz.height()), self.pm,
+                         QRectF(self.pm.rect()))
         elif self.text:
-            f = QFont(T.HEAD, max(7, min(12, int(self.width() / 26))))
+            f = QFont(T.HEAD, max(7, min(12, int(r.width() / 26))))
             f.setWeight(QFont.DemiBold)
             p.setFont(f)
             p.setPen(QColor(c['muted']))
-            area = self.rect()
             if self.icon:                       # Franka trademark where the camera picture is missing
                 ic = T.icon_pixmap(T.MODE)
-                compact = self.height() < 120          # small inset: icon only, no text
-                side = max(30, min(160, int(min(self.width(), self.height()) * (0.46 if compact else 0.36))))
-                box = QRectF((r.width() - side) / 2, r.height() / 2 - side * (0.5 if compact else 0.75), side, side)
+                compact = r.height() < 120      # small inset: icon only, no text
+                side = max(30, min(160, int(min(r.width(), r.height()) * (0.46 if compact else 0.36))))
+                box = QRectF(r.left() + (r.width() - side) / 2,
+                             r.top() + r.height() / 2 - side * (0.5 if compact else 0.75), side, side)
                 p.setOpacity(0.9)
                 if self.loading:                # pulsing trademark inside a spinning ring
                     p.setOpacity(0.55 + 0.4 * (0.5 + 0.5 * math.sin(math.radians(self.phase * 1.5))))
@@ -560,24 +579,46 @@ class ImageView(QWidget):
                     p.setPen(pen)
                     p.drawArc(ring, int(-self.phase * 16), 100 * 16)
                 if not compact:
-                    area = self.rect().adjusted(0, int(r.height() / 2 + side * 0.5), 0, 0)
+                    area = QRectF(r.left(), r.top() + r.height() / 2 + side * 0.5, r.width(), r.height())
                     p.drawText(area, Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap, self.text)
             else:
-                p.drawText(area, Qt.AlignCenter | Qt.TextWordWrap, self.text)
-        for text, right in ((self.badge, False), (self.badge_r, True)):   # corner labels: camera name / fps
-            if not text:
-                continue
-            f = QFont(T.HEAD, 7 if small else 9)
+                p.drawText(r, Qt.AlignCenter | Qt.TextWordWrap, self.text)
+        # ---- caption chips (design spec 5.8): name chip top-left, status chip top-right
+        if self.badge:
+            f = QFont(T.HEAD, 8 if small else 11)
+            f.setWeight(QFont.DemiBold)
+            p.setFont(f)
+            fm = p.fontMetrics()
+            w = fm.horizontalAdvance(self.badge) + (16 if small else 28)
+            h = fm.height() + (8 if small else 16)
+            m = 8 if small else 14
+            box = QRectF(r.left() + m, r.top() + m, w, h)
+            p.setPen(QPen(QColor(c['line']), 1))
+            p.setBrush(QColor(255, 255, 255, 235))
+            p.drawRoundedRect(box, 6 if small else 8, 6 if small else 8)
+            p.setPen(QColor('#1B2F36'))
+            p.drawText(box, Qt.AlignCenter, self.badge)
+        if self.badge_r:
+            fg, bg = variant_colors(self.badge_variant)
+            f = QFont(T.MONO, 8 if small else 9)
             f.setWeight(QFont.Bold)
             p.setFont(f)
-            w = p.fontMetrics().horizontalAdvance(text) + 18
-            h = p.fontMetrics().height() + 8
-            x = self.width() - w - 10 if right else 10
+            fm = p.fontMetrics()
+            w = fm.horizontalAdvance(self.badge_r) + 44
+            h = fm.height() + 14
+            m = 8 if small else 14
+            box = QRectF(r.right() - w - m, r.top() + m, w, h)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 150))
-            p.drawRoundedRect(QRectF(x, 10, w, h), h / 2, h / 2)
-            p.setPen(QColor(T.WHITE))
-            p.drawText(QRectF(x, 10, w, h), Qt.AlignCenter, text)
+            p.setBrush(QColor(bg))
+            p.drawRoundedRect(box, h / 2, h / 2)
+            ring = QColor(fg)
+            ring.setAlphaF(0.2)
+            p.setBrush(ring)
+            p.drawEllipse(QPointF(box.left() + 17, box.center().y()), 7, 7)
+            p.setBrush(QColor(fg))
+            p.drawEllipse(QPointF(box.left() + 17, box.center().y()), 4, 4)
+            p.setPen(QColor(fg))
+            p.drawText(QRectF(box.left() + 28, box.top(), w - 36, h), Qt.AlignVCenter | Qt.AlignLeft, self.badge_r)
 
 
 def label(text, name='value', wrap=False):
@@ -807,59 +848,53 @@ class HomePage(QWidget):
 
 
 class PipView(ImageView):
-    """Main camera picture with a small clickable inset (the other view) in its bottom-right corner."""
+    """Main camera picture with the depth inset (spec 5.9: 32 % of the tile, 16:10, 3 px white frame, 14 px from the
+    bottom-right corner)."""
 
     def __init__(self):
         super().__init__(icon=True)
         self.inset = ImageView(icon=True)
+        self.inset.white_border = True
         self.inset.setParent(self)
         self.inset.setMinimumSize(60, 34)
 
     def resizeEvent(self, e):
-        w = max(90, int(self.width() * 0.30))
-        h = int(w * 9 / 16)
-        m = max(6, int(self.width() * 0.02))
+        w = max(90, int(self.width() * 0.32))
+        h = int(w * 10 / 16)
+        m = 14
         self.inset.setGeometry(self.width() - w - m, self.height() - h - m, w, h)
         super().resizeEvent(e)
 
 
-class _Fps:
-    """tile.fps.setText('30 FPS') -> small badge in the picture's top-right corner."""
-
-    def __init__(self, tile):
-        self.tile = tile
-
-    def setText(self, text):
-        self.tile.view.badge_r = text
-        self.tile.view.update()
-
-
 class CameraTile(QWidget):
-    """Title + main RGB picture (16:9) with the DEPTH view as a small picture-in-picture inset (always on)."""
+    """Feed tile: name chip top-left, status chip top-right, picture (16:9); hand cameras carry the depth inset."""
 
     def __init__(self, title, key, hub, depth_only=False, pip=True):
         super().__init__()
-        self.key, self.hub, self.depth_only, self.pip = key, hub, depth_only, pip     # pip=False: no depth inset (ZED has its own depth tile)
+        self.key, self.hub, self.depth_only, self.pip = key, hub, depth_only, pip     # pip=False: no depth inset
+        self.name = 'Head Cam – Depth' if depth_only else TILE_NAME.get(key, title)
         self.objs = {'rgb': NO_SIGNAL, 'depth': NO_SIGNAL}
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        self.name = title.upper()
-        self.fps = _Fps(self)
         self.view = PipView()
         v.addWidget(self.view, 1)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         hub.depth_changed.connect(lambda _m: self.render())
         hub.pip_changed.connect(lambda _b: self.render())
+        self.view.inset.badge = INSET_NAME.get(key, 'Depth')
         self.render()
 
     def height_for(self, w):
-        """Tile height for a given width: title row + 16:9 picture."""
         return int(w * 9 / 16)
 
     def set_frame(self, mode, obj):
         self.objs[mode] = obj
         self.render()
+
+    def set_status(self, variant, text):
+        self.view.badge_variant, self.view.badge_r = variant, text
+        self.view.update()
 
     @staticmethod
     def show(view, obj):
@@ -869,22 +904,20 @@ class CameraTile(QWidget):
             view.set_text(obj, loading=(obj in (NO_SIGNAL, NO_DEPTH)))
 
     def render(self):
+        self.view.badge = self.name
         if self.depth_only:                   # separate DEPTH tile (head camera), no inset
             self.show(self.view, self.objs['depth'])
-            self.view.badge = self.name
             self.view.inset.setVisible(False)
             self.view.update()
             return
         main = self.hub.depth
         other = 'rgb' if main == 'depth' else 'depth'
         self.show(self.view, self.objs[main])
-        self.view.badge = f'{self.name}  ·  {main.upper()}'
         # inset only while there is a picture to show (a missing camera shows just the loading animation)
         show_inset = self.pip and self.hub.pip and (isinstance(self.objs[main], QPixmap) or isinstance(self.objs[other], QPixmap))
         self.view.inset.setVisible(show_inset)
         if show_inset:
             self.show(self.view.inset, self.objs[other])
-            self.view.inset.badge = other.upper()
         self.view.update()
 
     def refresh(self):
@@ -892,129 +925,220 @@ class CameraTile(QWidget):
         self.view.inset.update()
 
 
-class StatusRow(QFrame):
-    """One device line of the ROBO STATUS list: name on the left, dot + status word (mono) on the right."""
-    COLORS = {'ok': '#1B7F4B', 'bad': '#C62828', 'warn': '#B26A00'}
+class StatusPill(QWidget):
+    """Status pill (spec 5.6): exactly 128 x 28, tinted, dot with halo + uppercase mono label."""
 
-    def __init__(self, text, sub=False):
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(128, 28)
+        self.variant, self.label = 'off', ''
+
+    def set(self, variant, label):
+        self.variant, self.label = variant, label
+        self.update()
+
+    def paintEvent(self, _e):
+        fg, bg = variant_colors(self.variant)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(bg))
+        p.drawRoundedRect(QRectF(self.rect()), 14, 14)
+        f = QFont(T.MONO, 9)
+        f.setWeight(QFont.Bold)
+        f.setLetterSpacing(QFont.AbsoluteSpacing, 0.4)
+        p.setFont(f)
+        tw = p.fontMetrics().horizontalAdvance(self.label)
+        x = (self.width() - (8 + 8 + tw)) / 2
+        halo = QColor(fg)
+        halo.setAlphaF(0.2)
+        p.setBrush(halo)
+        p.drawEllipse(QPointF(x + 4, 14), 7, 7)
+        p.setBrush(QColor(fg))
+        p.drawEllipse(QPointF(x + 4, 14), 4, 4)
+        p.setPen(QColor(fg))
+        p.drawText(QRectF(x + 16, 0, tw + 4, 28), Qt.AlignVCenter | Qt.AlignLeft, self.label)
+
+
+class ModeSwitch(QWidget):
+    """Manual | Execution switch (spec 5.7): 128 wide, exactly one option active. On this page it only SHOWS the
+    arm's real Franka Desk mode (Manual = Programming); changing it is done in Operator Mode > Robot setup."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(128, 26)
+        self.mode = None
+        self.setToolTip('Shows the arm mode. Change it in Operator Mode > Robot setup.')
+
+    def set_mode(self, mode):
+        if mode != self.mode:
+            self.mode = mode
+            self.update()
+
+    def paintEvent(self, _e):
+        c = T.pal()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QColor(c['line']), 1))
+        p.setBrush(QColor(c['track']))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 13, 13)
+        f = QFont(T.HEAD, 7)
+        f.setWeight(QFont.DemiBold)
+        p.setFont(f)
+        ow = (self.width() - 4) / 2
+        for i, (key, text) in enumerate((('manual', 'Manual'), ('execution', 'Execution'))):
+            box = QRectF(2 + i * ow, 2, ow, 22)
+            active = self.mode == key
+            if active:
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(T.DARK_BLUE if T.MODE == 'light' else T.GREY))
+                p.drawRoundedRect(box, 11, 11)
+            p.setPen(QColor(T.WHITE if active else c['muted']))
+            p.drawText(box, Qt.AlignCenter, text)
+
+
+class DeviceRow(QFrame):
+    """Sidebar row (spec 5.4 / 5.5). Parent: min 48 px, grows with its group. Sub-row: 36 px, indented, accent edge.
+    Control on the right: status pill or mode switch (same right edge for all)."""
+
+    def __init__(self, name, sub=False, mode=False):
         super().__init__()
         self.setObjectName('row')
         self.sub = sub
         h = QHBoxLayout(self)
-        h.setContentsMargins(18 if sub else 16, 0, 16, 0)
+        h.setContentsMargins(12 if sub else 16, 0, 16, 0)
         h.setSpacing(10)
-        self.name = QLabel(text)
-        self.dot = Dot()
-        self.val = QLabel()
+        self.name = QLabel(name)
+        self.ctrl = ModeSwitch() if mode else StatusPill()
         h.addWidget(self.name, 1)
-        h.addWidget(self.dot)
-        h.addWidget(self.val)
-        self.setFixedHeight(44 if sub else 48)
-        self.level = 'off'
+        h.addWidget(self.ctrl)
+        if sub:
+            self.setFixedHeight(36)
+        else:
+            self.setFixedHeight(44)                  # LivePage.fit_rows() stretches all parent rows equally
         self.restyle()
 
-    def set(self, level, text):
-        self.level = level
-        self.dot.set_level(level)
-        self.val.setText(text)
-        self.restyle()
+    def set(self, variant, label):
+        self.ctrl.set(variant, label)
+
+    def set_mode(self, mode):
+        self.ctrl.set_mode(mode)
 
     def restyle(self):
         c = T.pal()
-        border = f'border-left:3px solid {T.DARK_BLUE if T.MODE == "light" else T.OFF_WHITE};' if self.sub else ''
-        self.setStyleSheet(f"QFrame#row {{background:{c['row']}; border-radius:10px; {border}}}"
-                           f"QLabel {{background:transparent;}}")
-        self.name.setStyleSheet(f"font-size:{14 if self.sub else 15}px; color:{c['fg']}; background:transparent;")
-        col = self.COLORS.get(self.level, c['muted'])
-        if T.MODE == 'dark' and self.level in self.COLORS:
-            col = {'ok': '#6FD39A', 'bad': '#FF8A8A', 'warn': '#F2B54A'}[self.level]
-        self.val.setStyleSheet(f"font-family:'{T.MONO}'; font-weight:700; font-size:12px; color:{col}; "
-                               "background:transparent;")
+        edge = f"border-left:3px solid {T.DARK_BLUE if T.MODE == 'light' else T.OFF_WHITE};" if self.sub else ''
+        self.setStyleSheet(f"QFrame#row {{background:{c['row']}; border:1px solid {c['line']}; {edge} "
+                           "border-radius:10px;}")
+        self.name.setStyleSheet(f"font-size:{14 if self.sub else 16}px; font-weight:500; color:{c['fg']}; "
+                                "background:transparent; border:none;")
+        self.ctrl.update()
 
 
 class LivePage(QWidget):
-    """Camera page (layout from the design mockup, Franka brand colours): header bar with logo and controls,
-    ROBO STATUS device list on the left, 2 x 2 camera grid on the right:
-        ZED Mini RGB | ZED Mini DEPTH
-        left wrist (+ depth inset) | right wrist (+ depth inset)"""
-    SIDE_W = 410
+    """Camera page, adapted from the design spec "Teleop Control Station" (Franka brand colours, Montserrat):
+    header (logo, title, tabs), ROBO STATUS sidebar (slides out, closed by default) and a 2 x 2 camera grid:
+        Head Cam - RGB | Head Cam - Depth
+        Hand Cam - Left (+ depth inset) | Hand Cam - Right (+ depth inset)"""
+    SIDE_W = 400
     GAP = 8                               # small gap between the camera pictures
-    MARGIN = 12                           # small margin around the page
+    MARGIN = 16                           # page margin / spacing between header and body
+    go_home = pyqtSignal()
+    go_operator = pyqtSignal()
 
-    ROWS = [('ROBOTS', [('arm_left', 'FR3 Left Arm', 0), ('arm_right', 'FR3 Right Arm', 0)]),
-            ('END EFFECTORS', [('grip', 'Gripper', 0), ('grip_left', 'Left Gripper', 1), ('grip_right', 'Right Gripper', 1)]),
-            ('CAMERAS', [('cam_zed', 'ZED Mini · Overview', 0), ('cam_d405_1', 'Left Wrist · D405 #1', 0),
-                         ('cam_d405_2', 'Right Wrist · D405 #2', 0)]),
-            ('TELEOP HARDWARE', [('gello', 'GELLO Duo', 0), ('gello_left', 'Left Hand', 1), ('gello_right', 'Right Hand', 1)])]
+    GROUPS = [('Robots', [('arm_left', 'FR3 Left Arm', 'p'), ('fci_left', 'FCI', 's'), ('mode_left', 'Mode', 'm'),
+                          ('arm_right', 'FR3 Right Arm', 'p'), ('fci_right', 'FCI', 's'), ('mode_right', 'Mode', 'm')]),
+              ('End Effectors', [('grip', 'Gripper', 'p'), ('grip_left', 'Left Gripper', 's'),
+                                 ('grip_right', 'Right Gripper', 's')]),
+              ('Cameras', [('cam_zed', 'Head Cam', 'p'), ('cam_d405_1', 'Hand Cam – Left', 'p'),
+                           ('cam_d405_2', 'Hand Cam – Right', 'p')]),
+              ('Teleop Hardware', [('gello', 'Gello Duo', 'p'), ('gello_left', 'Left Hand', 's'),
+                                   ('gello_right', 'Right Hand', 's')])]
 
     def __init__(self, hub):
         super().__init__()
         self.hub = hub
         root = QVBoxLayout(self)
-        root.setContentsMargins(self.MARGIN, self.MARGIN, self.MARGIN, self.MARGIN)
-        root.setSpacing(self.GAP)
+        root.setContentsMargins(self.MARGIN, 6, self.MARGIN, 6)      # small top / bottom margin (cameras get the height)
+        root.setSpacing(8)
         self.side_w, self.status_open = 0, False
 
-        # ---- header bar: logo + title left, controls (moved in by MainWindow) right
+        # ---- header bar (76 px): logo + title left, tabs + controls right
         self.header = QFrame()
         self.header.setObjectName('card')
+        self.header.setFixedHeight(76)
         hl = QHBoxLayout(self.header)
-        hl.setContentsMargins(20, 8, 12, 8)
-        hl.setSpacing(20)
+        hl.setContentsMargins(20, 0, 16, 0)
+        hl.setSpacing(16)
         self.logo = QLabel()
         self.logo.setObjectName('plain')
         hl.addWidget(self.logo, 0, Qt.AlignVCenter)
         titles = QVBoxLayout()
         titles.setSpacing(2)
-        titles.addWidget(label('TELEOP CONTROL STATION', 'cardTitle'))
-        titles.addWidget(label('DUAL-ARM  /  GELLO DUO', 'mono'))
+        self.title = QLabel('Teleop Control Station')
+        self.title.setObjectName('plain')
+        self.subtitle = label('DUAL-ARM  /  GELLO DUO', 'mono')
+        titles.addWidget(self.title)
+        titles.addWidget(self.subtitle)
         hl.addLayout(titles)
         hl.addStretch(1)
-        self.strip = QHBoxLayout()
-        self.strip.setSpacing(12)
+        self.track = QFrame()                              # nav tabs: Home | Camera View | Operator Mode
+        self.track.setObjectName('track')
+        tl = QHBoxLayout(self.track)
+        tl.setContentsMargins(4, 4, 4, 4)
+        tl.setSpacing(6)
+        self.tabs = []
+        for text, slot in (('Home', self.go_home.emit), ('Camera View', None), ('Operator Mode', self.go_operator.emit)):
+            b = QPushButton(text)
+            b.setFixedHeight(40)
+            b.setProperty('active', slot is None)
+            if slot:
+                b.clicked.connect(slot)
+            else:
+                b.setCursor(Qt.ArrowCursor)
+            tl.addWidget(b)
+            self.tabs.append(b)
+        self.track.setFixedHeight(48)
+        hl.addWidget(self.track, 0, Qt.AlignVCenter)
+        self.strip = QHBoxLayout()                         # STATUS / theme / full screen (moved in by MainWindow)
+        self.strip.setSpacing(10)
         hl.addLayout(self.strip)
         root.addWidget(self.header)
 
         body = QHBoxLayout()
         body.setSpacing(self.GAP)
-        # ---- ROBO STATUS list
+        # ---- ROBO STATUS sidebar
         self.panel = QFrame()
         self.panel.setObjectName('card')
         self.panel.setFixedWidth(1)
-        self.panel.hide()                                  # status window is closed by default (visitors don't see it)
+        self.panel.hide()                                  # closed by default (visitors don't see it)
         sv = QVBoxLayout(self.panel)
-        sv.setContentsMargins(20, 18, 20, 18)
-        sv.setSpacing(8)
+        sv.setContentsMargins(20, 16, 20, 16)
+        sv.setSpacing(12)
         top = QHBoxLayout()
         top.addWidget(label('ROBO STATUS', 'cardTitle'))
         top.addStretch(1)
         top.addWidget(label('11 devices', 'mono'))
         sv.addLayout(top)
-        self.state = label('', 'value', wrap=True)
+        self.state = label('', 'mono')
+        self.state.setMaximumHeight(18)
         sv.addWidget(self.state)
         self.rows = {}
-        for group, items in self.ROWS:
-            cap = label(group, 'caption')
-            cap.setContentsMargins(2, 6, 0, 0)
-            sv.addWidget(cap)
-            for key, text, sub in items:
-                r = StatusRow(text, bool(sub))
+        for group, items in self.GROUPS:
+            gl = QVBoxLayout()
+            gl.setSpacing(6)
+            gl.addWidget(label(group.upper(), 'caption'))
+            parents = 0
+            for key, text, kind in items:
+                r = DeviceRow(text, sub=(kind != 'p'), mode=(kind == 'm'))
                 self.rows[key] = r
-                if sub:
-                    w = QWidget()
-                    w.setObjectName('plain')
-                    wl = QHBoxLayout(w)
-                    wl.setContentsMargins(14, 0, 0, 0)
-                    wl.addWidget(r)
-                    sv.addWidget(w)
-                else:
-                    sv.addWidget(r)
-        sv.addStretch(1)
+                parents += kind == 'p'
+                gl.addWidget(r)
+            sv.addLayout(gl)
         body.addWidget(self.panel)
 
         # ---- camera grid
         self.tiles = {key: CameraTile(title, key, hub, pip=(key != 'zed')) for title, key, _, _ in CAMERAS}
-        self.zed_depth = CameraTile('ZED Mini · Depth', 'zed', hub, depth_only=True)
+        self.zed_depth = CameraTile('Head Cam – Depth', 'zed', hub, depth_only=True)
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)               # no margins: tile sizes add up exactly (no window growth)
         grid.setSpacing(self.GAP)
@@ -1023,30 +1147,43 @@ class LivePage(QWidget):
         grid.addWidget(self.zed_depth, 0, 1)
         grid.addWidget(self.tiles['d405_1'], 1, 0)
         grid.addWidget(self.tiles['d405_2'], 1, 1)
-        self.grid = grid
         gw = QWidget()
         gw.setObjectName('plain')
         gw.setLayout(grid)
         body.addWidget(gw, 1)
         root.addLayout(body, 1)
+        self.restyle()
 
     def set_status_open(self, on):
-        """Slide the ROBO STATUS window in / out; the cameras grow to fill the freed width."""
+        """Slide the ROBO STATUS sidebar in / out; the cameras grow to fill the freed width."""
         if on == self.status_open:
             return
         self.status_open = on
         if on:
             self.panel.show()
+            QTimer.singleShot(0, self.fit_rows)
         if not hasattr(self, 'anim'):
             self.anim = QVariantAnimation(self)
             self.anim.setDuration(260)
             self.anim.setEasingCurve(QEasingCurve.InOutCubic)
             self.anim.valueChanged.connect(self._set_side)
-            self.anim.finished.connect(lambda: self.panel.setVisible(self.status_open))
+            self.anim.finished.connect(lambda: (self.panel.setVisible(self.status_open), self.fit_rows()))
         self.anim.stop()
         self.anim.setStartValue(self.side_w)
         self.anim.setEndValue(self.SIDE_W if on else 0)
         self.anim.start()
+
+    def fit_rows(self):
+        """Share the free sidebar height equally between the 7 parent rows (spec 5.3); sub-rows stay 36 px."""
+        parents = [r for r in self.rows.values() if not r.sub]
+        for r in parents:
+            r.setFixedHeight(44)
+        lay = self.panel.layout()
+        lay.activate()
+        free = self.panel.height() - lay.minimumSize().height()
+        extra = max(0, free) // len(parents)
+        for r in parents:
+            r.setFixedHeight(44 + extra)
 
     def _set_side(self, v):
         self.side_w = int(v)
@@ -1063,17 +1200,27 @@ class LivePage(QWidget):
         self.logo.setFixedSize(w, h)
 
     def restyle(self):
+        c = T.pal()
+        self.title.setStyleSheet(f"font-size:22px; font-weight:700; color:{c['fg']}; background:transparent;")
+        self.track.setStyleSheet(f"QFrame#track {{background:{c['bg']}; border:1px solid {c['line']}; "
+                                 "border-radius:10px;}")
+        for b in self.tabs:       # Franka Grey buttons; the current page (Camera View) in Franka Dark Blue
+            active = bool(b.property('active'))
+            bg = (T.DARK_BLUE if T.MODE == 'light' else T.BLACK) if active else T.GREY
+            hov = bg if active else (T.DARK_BLUE if T.MODE == 'light' else T.GREY_HOVER)
+            b.setStyleSheet(f"QPushButton {{background:{bg}; color:{T.WHITE}; border:none; border-radius:8px; "
+                            f"padding:0 24px; font-size:15px; font-weight:600;}} QPushButton:hover {{background:{hov};}}")
         for r in self.rows.values():
             r.restyle()
         for t in (*self.tiles.values(), self.zed_depth):
             t.refresh()
 
     def fit_tiles(self):
-        """Four equal 16:9 tiles (2 x 2) that fill everything not used by the header and the status window."""
+        """Four equal 16:9 tiles (2 x 2) that fill everything not used by the header and the sidebar."""
         m = self.layout().contentsMargins()
         side = (self.side_w + self.GAP) if self.side_w > 0 else 0
         avail_w = self.width() - m.left() - m.right() - side
-        avail_h = self.height() - m.top() - m.bottom() - self.header.sizeHint().height() - self.GAP
+        avail_h = self.height() - m.top() - m.bottom() - self.header.height() - self.layout().spacing()
         if avail_w <= 200 or avail_h <= 200:
             return
         tw = min((avail_w - self.GAP) / 2, (avail_h - self.GAP) / 2 * 16 / 9)
@@ -1084,6 +1231,8 @@ class LivePage(QWidget):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self.fit_tiles()
+        if self.status_open:
+            QTimer.singleShot(0, self.fit_rows)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -1093,40 +1242,38 @@ class LivePage(QWidget):
         state = m.state
         self.state.setText(f'{state.replace("_", " ")}  ·  {plain(m.message)}' if m.message else state.replace('_', ' '))
         off = state == 'OFFLINE'
-        rows = self.rows
         lv = {}
         for arm in ARMS:
             a = m.arm(arm)
             if off or not a:
                 lv['arm_' + arm] = ('off', 'OFFLINE')
             elif a.get('errors') or a.get('robot_mode') in ('REFLEX', 'USER_STOPPED'):
-                lv['arm_' + arm] = ('bad', 'ERROR')
+                lv['arm_' + arm] = ('off', 'ERROR')
             elif m.arm_level(arm) == 'ok':
                 lv['arm_' + arm] = ('ok', 'ONLINE')
             else:
-                lv['arm_' + arm] = ('bad', 'NOT CONNECTED')
+                lv['arm_' + arm] = ('off', 'OFFLINE')
+            d = m.desk.get(arm, {}) if m.desk_ok else {}
+            lv['fci_' + arm] = (('ok', 'ENABLED') if d.get('fci') else ('warn', 'DISABLED') if d else ('off', 'NO DATA'))
+            self.rows['mode_' + arm].set_mode({'Programming': 'manual', 'Execution': 'execution'}.get(d.get('mode')))
             g = a.get('gripper', 'off')
-            lv['grip_' + arm] = (('ok', 'CONNECTED') if g == 'ready' else ('bad', 'NOT READY') if g == 'not ready'
-                                 else ('off', 'OFF'))
+            lv['grip_' + arm] = (('ok', 'CONNECTED') if g == 'ready' else ('warn', 'NOT READY') if g == 'not ready'
+                                 else ('off', 'OFFLINE'))
             h = a.get('gello', 'no data')
             lv['gello_' + arm] = (('ok', 'CONNECTED') if h in ('in holder', 'out of holder')
-                                  else ('off', 'OFFLINE') if off else ('bad', 'NO DATA'))
+                                  else ('off', 'OFFLINE') if off else ('off', 'NO DATA'))
         for parent, kids in (('grip', ('grip_left', 'grip_right')), ('gello', ('gello_left', 'gello_right'))):
             levels = [lv[k][0] for k in kids]
             lv[parent] = (('ok', 'CONNECTED') if all(x == 'ok' for x in levels) else
-                          ('bad', 'CHECK') if 'bad' in levels else ('off', 'OFF'))
-        launch = m.s.get('cameras_launch', 'off') if m.connected else 'off'
+                          ('warn', 'CHECK') if 'warn' in levels or 'ok' in levels else ('off', 'OFFLINE'))
         for key in CAM_TITLE:
-            fps = m.cam_fps(key)
-            lv['cam_' + ('zed' if key == 'zed' else key)] = (('ok', 'LIVE') if fps else
-                                                            ('off', 'OFF') if launch == 'off' else ('bad', 'NO SIGNAL'))
-        for key, (level, text) in lv.items():
-            rows[key].set(level, text)
+            lv['cam_' + key] = ('ok', 'LIVE') if m.cam_fps(key) else ('off', 'NO SIGNAL')
+        for key, (variant, text) in lv.items():
+            if key in self.rows:
+                self.rows[key].set(variant, text)
         for key, tile in self.tiles.items():
-            fps = m.cam_fps(key)
-            tile.fps.setText(f'{fps:.0f} FPS' if fps else '')
-        fps = m.cam_fps('zed')
-        self.zed_depth.fps.setText('')
+            tile.set_status(*lv['cam_' + key])
+        self.zed_depth.set_status(*lv['cam_zed'])
 
 
 class OperatorPage(QWidget):
@@ -1419,13 +1566,12 @@ class MainWindow(ConfirmClose, QWidget):
             if slot:
                 b.clicked.connect(slot)
             return b
-        self.b_home = navbtn('HOME', self.go_home)                    # camera page only
         self.b_status = navbtn(slot=lambda: self.set_status(not self.live.status_open))   # camera page only
         self.b_operator = navbtn('OPERATOR MODE', self.open_operator)   # no drop-down: opens the operator panel
         self.b_theme = navbtn(slot=lambda: hub.set_theme('dark' if hub.theme == 'light' else 'light'))
         self.b_full = navbtn(slot=self.toggle_full)
         self.main_window = self                      # the camera window points at the main window (see main())
-        for w in (self.chip_left, self.chip_right, self.chip_cams, self.b_status, self.b_home, self.b_operator, self.b_theme, self.b_full):
+        for w in (self.chip_left, self.chip_right, self.chip_cams, self.b_status, self.b_operator, self.b_theme, self.b_full):
             cl.addWidget(w)
         nl.addWidget(self.controls)
         self.nav, self.controls_host = nav, nl
@@ -1449,6 +1595,8 @@ class MainWindow(ConfirmClose, QWidget):
         self.home, self.live = HomePage(), LivePage(hub)
         self.operator = OperatorPage(model, ros)
         self.operator.back.connect(self.go_auto)
+        self.live.go_home.connect(self.go_home)
+        self.live.go_operator.connect(self.open_operator)
         for pg in (self.home, self.live, self.operator):
             self.stack.addWidget(pg)
         outer.addWidget(self.stack, 1)
@@ -1470,7 +1618,7 @@ class MainWindow(ConfirmClose, QWidget):
         # camera page: no navbar - the controls move into the page's header bar (the status list shows the chips' info)
         for chip in (self.chip_left, self.chip_right, self.chip_cams):
             chip.setVisible(not on_live)
-        self.b_home.setVisible(on_live)
+        self.b_operator.setVisible(not on_live)       # the camera page has the Operator Mode tab instead
         self.b_status.setVisible(on_live)
         self.controls_host.removeWidget(self.controls)
         self.controls_host = self.live.strip if on_live else self.nav.layout()

@@ -15,6 +15,7 @@ Full before/after table: [GUI_CHANGES.md](GUI_CHANGES.md).
   On the camera page the navbar is hidden: a header bar (logo, title, HOME, OPERATOR MODE, theme, full screen) replaces it.
   Chip connected = Franka Dark Blue + blinking green dot; not connected = light Franka Grey + blinking red dot.
 - **Live (camera) page**: opens on `TELEOP_STARTING` / `TELEOP`, back to Home on STOP / error.
+  Design = colleague's spec "Teleop Control Station – UI Design Specification" (in Downloads) adapted to the Franka brand, see GUI_CHANGES.md.
   Layout (from the mockup `assets/brand/Home@1x(2).png`, Franka brand colours): header bar (logo, title, HOME, OPERATOR MODE, theme, full screen),
   **ROBO STATUS** list on the left (11 devices, `LivePage.update_model`), 2 x 2 camera grid on the right: **ZED RGB | ZED DEPTH** on top,
   **left wrist | right wrist** below (ASSUMPTION: `d405_1` = left, `d405_2` = right; swap the titles in `CAMERAS` if wrong).
