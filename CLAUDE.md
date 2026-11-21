@@ -109,6 +109,9 @@ Implementation facts learned on this machine (do not regress):
 - Use anchored pgrep patterns (pgrep -f matches shell command text otherwise).
 
 ## ~/robot_demo layout
+- GitHub (PUBLIC, 2026-11-21): github.com/JithinLalPradeepK/fr3-duo-gello-teleop, branch main. Colleagues work on the
+  GUI (docs/GUI_DEVELOPMENT.md); user does demo fixes. Not in git: logs/, scripts/.backup/, docs/brand/, Franka logo
+  files (trademark). external/ + system/ = copies of out-of-repo files - refresh them when those change.
 - env/host_env.sh; launch/cameras.launch.py, arms_gated.launch.py (arms:=, robot_config:=),
   gello_check.launch.py; config/franka_gello_duo_check.yaml (keep in sync with franka_gello_duo.yaml),
   config/fr3_duo_sim.yaml (fake hardware); scripts/gello_gate.py (--arm, exit 0 stop/2 refused/3 fault/
