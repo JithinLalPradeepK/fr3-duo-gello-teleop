@@ -11,18 +11,20 @@ Full before/after table: [GUI_CHANGES.md](GUI_CHANGES.md).
 
 - **Home**: white page, FR3 Duo picture, one line, no buttons. Pedals drive everything.
 - **Navbar**: logo (black on light, white on dark), LEFT ARM / RIGHT ARM / CAMERAS chips (click = details popup),
-  Operator menu, light / dark switch (light default).
+  STATUS (camera page only), OPERATOR button (no drop-down), light / dark switch (light default), FULL SCREEN <-> window button.
   Chip connected = Franka Dark Blue + blinking green dot; not connected = light Franka Grey + blinking red dot.
 - **Live (camera) page**: opens on `TELEOP_STARTING` / `TELEOP`, back to Home on STOP / error.
   Layout: ZED Mini overview centre, **left wrist bottom-left, right wrist bottom-right** (ASSUMPTION: `d405_1` = left, `d405_2` = right;
   swap the titles in `CAMERAS` if wrong). Tiles are 16:9 and sized to fill the page (`LivePage.fit_tiles`: ZED row + wrist row fill the height under the toolbar,
   wrists = 62 % of the ZED width via `WRIST_RATIO`; at 1080p: ZED ~935 px, wrists ~580 px wide).
-  **Depth = picture-in-picture** on every camera: main view RGB + DEPTH inset (or reverse via MAIN VIEW switch top right);
-  click the inset to swap; PICTURE-IN-PICTURE button switches it off. Both views are decoded once (Decoder) and only while visible.
-  **Status panel** = slide panel (STATUS button top left), sits in the free space beside the ZED overview (top-left).
+  **Depth = picture-in-picture** on every camera: RGB main picture + DEPTH inset, always on (no switches; `Hub.depth='rgb'`, `Hub.pip=True`).
+  Both views are decoded once (Decoder) and only while visible.
+  **Status panel** = slide panel (STATUS button in the navbar), **default closed**; opens in the free space beside the ZED overview
+  (top-left). The ZED never moves (fixed-width side slots). While closed, real errors show in the bar under the navbar.
   Problems in plain words in the panel. Missing picture = loading animation (see below).
 - **Two monitors**: display 1 (`--control-screen`, default 0) shows Home / Operator and switches to the Live page on START (back to Home on STOP);
-  display 2 (`--camera-screen`, default 1) shows the Live page ALWAYS (no Operator menu there). Cameras are decoded once and shared.
+  display 2 (`--camera-screen`, default 1) shows the Live page ALWAYS. Its OPERATOR button opens the operator panel on display 1.
+  Cameras are decoded once and shared. Both windows start FULL SCREEN; the FULL SCREEN button switches to a normal window.
   One monitor or `--single` = one window (Home, then Live on START). Theme switch applies to both.
 - **No camera**: the tile shows the Franka trademark pulsing inside a spinning ring + "WAITING FOR CAMERA ..." (loading animation, runs only while waiting).
 - **Operator panel** (navbar Operator > Operator panel): ONE page with all sections visible at once, 3-column grid:
