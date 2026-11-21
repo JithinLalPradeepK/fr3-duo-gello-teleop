@@ -210,6 +210,10 @@ EXHIBITION GUI (2026-11-20, for DIDAC 2026): scripts/demo_gui.py redesigned + sc
   Safety colours kept (START green, STOP/ERROR red, motion amber). `demo_gui.py --preview` = design preview with
   demo data, ROS domain 199, sends nothing (F9 = demo ERROR). Backup .backup/demo_gui.py.20261120_brand.
   Supervisor logs "demo_supervisor running" at start -> start_demo.sh opens GUI at once.
+GUI REDESIGN (2026-11-21, branch features/GUI-development, Akshay): demo_gui.py + franka_theme.py rewritten (white
+  home without buttons, navbar chips, Live camera page mirrored on 2 monitors, Operator menu, light/dark, grey buttons,
+  Franka trademark in empty camera tiles). Preview-tested only. See docs/GUI_CHANGES.md and docs/HANDOFF_GUI.md.
+  Depth view: add the topic to CAMERAS in demo_gui.py. PNG brand assets stay out of git (copy into assets/brand/).
 TEST SESSION 1 (2026-11-20 20:33-21:26): scripts/test_recorder.py (read-only) -> logs/test_20261120_203258/.
   Findings + suggestions S1-S11: docs/test_notes_2026-11-20.md. Key: 5 cartesian reflexes in ~5 min LIVE
   (hypothesis: 25 Hz GELLO steps relayed raw, K=240 -> torque steps), 1 self-collision reflex during ramp;
@@ -265,3 +269,17 @@ The GUI is not a safety device; the physical E-stop stays in use.
 POWBORO FS2020 (PCsensor, USB 3553:b001), programmed with ElfKey, appears as a keyboard. Plan: pedal node reads
 /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd with evdev (needs a udev rule for event* access) and calls the
 same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_tools/home_fr3s.sh.
+
+## NEW GUI MERGED (2026-11-21, from origin/features/GUI-development by Akshay; see docs/HANDOFF_GUI.md)
+- Home (white, no buttons, pedals drive) / Live camera page (auto on TELEOP_STARTING/TELEOP) / Operator menu
+  (Testing stage, Fix errors, Status & logs, Robot setup, System). Display 1 (DP-0) home->live on START,
+  display 2 (DP-2) always cameras. USER DECISIONS 2026-11-21: NO extra STOP button on home/live (pedal 2 +
+  Operator menu + E-stop); buttons stay Franka Grey (safety colours dropped on purpose).
+- Assets (not in git): logo_black/white.png rendered from our SVGs, Trademark_negative copied from docs/brand.
+  fr3_duo.png (FR3 Duo picture for home) MISSING - ask Akshay (HumanoidFR3 assets/logos).
+- Fixed in GUI: Fix-errors text (ERROR RECOVERY restarts arm stack), PLAIN words (joint_velocity_violation...).
+- test/sim_gui_test.sh: GUI in-process (offscreen, both windows) + real supervisor on fake hardware, clicks the
+  GUI's own buttons: 33/33 (screenshots logs/simgui_*/shots). Operator buttons refresh only while the Operator
+  page is visible (harness opens it first). In sim arm chips are red (no robot_mode) - expected.
+- Sim status after merge + F1-F3: gate 117/117 + 15/15, supervisor 69/69, GUI 33/33. HARDWARE TEST NEXT.
+

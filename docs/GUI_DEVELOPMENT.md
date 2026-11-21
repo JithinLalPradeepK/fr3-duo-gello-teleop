@@ -17,7 +17,7 @@ python3 scripts/demo_gui.py --preview --single   # one window with tabs (laptop)
 ```
 
 `--preview` uses ROS domain 199, fills the GUI with demo data and **sends nothing**. Press **F9** to
-show a demo ERROR state.
+show a demo ERROR state (F5/F6/F7 = pedal START/STOP/HOME, F10 = drop a camera). See [GUI_CHANGES.md](GUI_CHANGES.md).
 
 ## Interface to the supervisor (do not change without agreeing with the supervisor side)
 
@@ -33,7 +33,7 @@ show a demo ERROR state.
 
 ## Rules
 
-- Keep the safety colours: START green, STOP / ERROR red, motion amber. STOP must always be enabled.
+- Buttons are Franka Grey (brand); STOP keeps a red outline and must always be enabled. Status dots: green ok, red problem.
 - The GUI must never send motion commands by itself (no timers or auto-retries of START or HOME).
 - Don't name Node attributes `handle` or `clients` (these names are taken by rclpy).
 - Watch the CPU: the GUI already uses ~47 % of a core for drawing 3 streams at 30 fps.
