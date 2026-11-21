@@ -312,6 +312,10 @@ same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_to
   the service arrives, cancels if the pedal is released early (status field "arming"). Gate still-time default 0.5 s.
   GUI should show hold progress (documented in docs/GUI_DEVELOPMENT.md; not implemented: colleagues own the GUI).
 - Home file ~/fr3_tools/fr3_duo_home/home_poses.txt now mirrored (backup .bak next to it, copy in external/).
-- Tests: gate suite 160/160 + 15/15 (S17-S24), geometry 100 %, pedal logic 17/17. Supervisor/GUI sims need the real demo
-  closed (they refuse while demo_supervisor runs): T6d-T6g (pedal prewarm) written, NOT YET RUN.
+- Tests (all sim, 2026-11-21 15:50): gate 160/160 + 15/15 (S17-S24), supervisor 96/96 (T6d-T6g pedal prewarm: START after
+  the hold -> TELEOP in 0.87 s in sim), GUI e2e 33/33, geometry + pedal logic pass.
+- GUI update from Akshay merged (24ff6db + a4fe508: camera page layout, depth picture-in-picture, slide-out status
+  panel, operator grid; origin/features/GUI-development). One conflict (Fix-errors card): kept his layout, our text.
+  test/sim_gui_test.py adapted (show_operator() has no section argument any more). UX note for him: on ERROR the camera
+  display shows the long message twice (title + PROBLEMS), with the log path. GUI does not show pedal-hold progress yet.
 

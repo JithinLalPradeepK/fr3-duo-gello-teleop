@@ -115,7 +115,7 @@ def scenario(gui, win, cam, model, arms, logdir, sim_cfg, R, app):
 
     def click(button_attr, section=0):
         def f():
-            win.show_operator(section)
+            win.show_operator()
             b = getattr(op, button_attr)
             if not b.isEnabled():
                 print(f'    (click {button_attr}: disabled; state {model.state}, connected {model.connected}, '
@@ -129,7 +129,7 @@ def scenario(gui, win, cam, model, arms, logdir, sim_cfg, R, app):
     def enabled(*attrs):
         def f():
             here = win.stack.currentIndex()
-            win.show_operator(0)                          # buttons are refreshed while the Operator page shows
+            win.show_operator()                          # buttons are refreshed while the Operator page shows
             out = {a: getattr(op, a).isEnabled() for a in attrs}
             if here != win.OPERATOR:
                 win.go_auto()
