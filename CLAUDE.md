@@ -109,6 +109,9 @@ Implementation facts learned on this machine (do not regress):
 - Use anchored pgrep patterns (pgrep -f matches shell command text otherwise).
 
 ## ~/robot_demo layout
+- GitHub (PUBLIC, 2026-11-21): github.com/JithinLalPradeepK/fr3-duo-gello-teleop, branch main. Colleagues work on the
+  GUI (docs/GUI_DEVELOPMENT.md); user does demo fixes. Not in git: logs/, scripts/.backup/, docs/brand/, Franka logo
+  files (trademark). external/ + system/ = copies of out-of-repo files - refresh them when those change.
 - env/host_env.sh; launch/cameras.launch.py, arms_gated.launch.py (arms:=, robot_config:=),
   gello_check.launch.py; config/franka_gello_duo_check.yaml (keep in sync with franka_gello_duo.yaml),
   config/fr3_duo_sim.yaml (fake hardware); scripts/gello_gate.py (--arm, exit 0 stop/2 refused/3 fault/
@@ -207,13 +210,39 @@ EXHIBITION GUI (2026-11-20, for DIDAC 2026): scripts/demo_gui.py redesigned + sc
   Safety colours kept (START green, STOP/ERROR red, motion amber). `demo_gui.py --preview` = design preview with
   demo data, ROS domain 199, sends nothing (F9 = demo ERROR). Backup .backup/demo_gui.py.20261120_brand.
   Supervisor logs "demo_supervisor running" at start -> start_demo.sh opens GUI at once.
+GUI REDESIGN (2026-11-21, branch features/GUI-development, Akshay): demo_gui.py + franka_theme.py rewritten (white
+  home without buttons, navbar chips, Live camera page mirrored on 2 monitors, Operator menu, light/dark, grey buttons,
+  Franka trademark in empty camera tiles). Preview-tested only. See docs/GUI_CHANGES.md and docs/HANDOFF_GUI.md.
+  Later 2026-11-21: 2 displays (1 = Home/Operator -> cameras on START, 2 = cameras always), camera page layout (ZED centre,
+  wrists bottom corners, depth always as picture-in-picture inset, no RGB/PiP switches; camera page without navbar: left sidebar = logo + big status
+  window + FR3 Duo picture, right = ZED on top, both wrists right below),
+  Operator = one grid page (button, no drop-down), loading animation, start full screen (FULL SCREEN button toggles).
+  Depth view: add the topic to CAMERAS in demo_gui.py. PNG brand assets stay out of git (copy into assets/brand/).
 TEST SESSION 1 (2026-11-20 20:33-21:26): scripts/test_recorder.py (read-only) -> logs/test_20261120_203258/.
   Findings + suggestions S1-S11: docs/test_notes_2026-11-20.md. Key: 5 cartesian reflexes in ~5 min LIVE
   (hypothesis: 25 Hz GELLO steps relayed raw, K=240 -> torque steps), 1 self-collision reflex during ramp;
   supervisor bugs O8 (STOP in ERROR overwrites message), O9 (SHUTDOWN while gates exiting), O10 (HOME: DONE arm
   stops the other), O4 (consequence error listed as cause).
   Robots left: Programming mode, FCI off, no control holder.
-NEXT (ask user first, diff + sim test before hardware): user to answer what happened at 20:43:10, 21:02:06,
+S2-S6 DONE in sim (2026-11-21, branch fix/s2-s6-recorder-supervisor, sim 68/68 incl. new T6c, T8; diff shown):
+  User: 20:43 double reflex = Rubik's cube held in one hand, other hand twisting a stuck layer (arms pushed against
+  each other via the cube); one single reflex = gripper touched the table. Other 2 single reflexes unexplained.
+  S2: test_recorder.py writes motion_<arm>.csv (|F_ext|, tau_ext, dq, command error/step, contact flags, 10 Hz) +
+  PEAK / "LAST 3 s" lines. S3 STOP in ERROR keeps the message. S4 gates killed once arm launch + all
+  ros2_control_nodes are gone; SHUTDOWN waits for gates. S5 HOME: arm that arrives (exit 0, unsignalled) doesn't
+  stop the other. S6 crash_causes(): first failure = cause, later "also ... X s later" / "stopped as a consequence".
+  ERROR RECOVERY after an arm crash now RESTARTS the arm stack only (grippers/GELLO/cameras keep running,
+  controllers inactive; sim 2 s); no new GUI button. START timeout 60 s (--start-timeout, gate --wait-timeout).
+  Gate (sim 109/109 + 15/15): S1 LIVE smoothing (LiveSmoother: segment to each GELLO sample over the measured
+  interval, 200 Hz, cap 2.0 rad/s; --live-hz 0 = old raw relay), S8 near joint limit -> keep waiting with hint,
+  S7 RESYNC in HOLD (GELLO still 2 s off snapshot -> deactivate, fresh instance, ramp to new pose; --resync-time 0
+  = off). Supervisor sim 69/69. Backups of pre-change files: git (commit 4ea0637).
+  HARDWARE TESTS OPEN (ask first): S1 smoothing feel + reflex rate with test_recorder running, RESYNC, ERROR
+  RECOVERY restart after a real reflex / E-stop. DECIDED 2026-11-21: keep the robots' own collision limits (no SetForceTorqueCollisionBehavior);
+  revisit only with S2 force data. S11 DECIDED 2026-11-21: keep as is (no max start distance, ramp
+  speed factor 0.2 unchanged). Push to GitHub only
+  at the very end (user).
+OLD NEXT (ask user first, diff + sim test before hardware): user to answer what happened at 20:43:10, 21:02:06,
   21:03:43; then S1 (gate LIVE smoothing 200 Hz + speed cap) + S2 (recorder logs external force), then S3-S6 bug
   fixes, then S7-S9 UX; S11 is a user decision (max start distance / slower ramp). Run test_recorder during tests.
 OLD PLAN, supervisor on hardware:
@@ -244,3 +273,136 @@ The GUI is not a safety device; the physical E-stop stays in use.
 POWBORO FS2020 (PCsensor, USB 3553:b001), programmed with ElfKey, appears as a keyboard. Plan: pedal node reads
 /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd with evdev (needs a udev rule for event* access) and calls the
 same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_tools/home_fr3s.sh.
+
+## NEW GUI MERGED (2026-11-21, from origin/features/GUI-development by Akshay; see docs/HANDOFF_GUI.md)
+- Home (white, no buttons, pedals drive) / Live camera page (auto on TELEOP_STARTING/TELEOP) / Operator menu
+  (Testing stage, Fix errors, Status & logs, Robot setup, System). Display 1 (DP-0) home->live on START,
+  display 2 (DP-2) always cameras. USER DECISIONS 2026-11-21: NO extra STOP button on home/live (pedal 2 +
+  Operator menu + E-stop); buttons stay Franka Grey (safety colours dropped on purpose).
+- Assets (not in git): logo_black/white.png rendered from our SVGs, Trademark_negative copied from docs/brand.
+  fr3_duo.png (FR3 Duo picture for home) MISSING - ask Akshay (HumanoidFR3 assets/logos).
+- Fixed in GUI: Fix-errors text (ERROR RECOVERY restarts arm stack), PLAIN words (joint_velocity_violation...).
+- test/sim_gui_test.sh: GUI in-process (offscreen, both windows) + real supervisor on fake hardware, clicks the
+  GUI's own buttons: 33/33 (screenshots logs/simgui_*/shots). Operator buttons refresh only while the Operator
+  page is visible (harness opens it first). In sim arm chips are red (no robot_mode) - expected.
+- Sim status after merge + F1-F3: gate 117/117 + 15/15, supervisor 69/69, GUI 33/33. HARDWARE TEST NEXT.
+
+## DUO COLLISION GUARD + PEDAL HOLD + FAST START (2026-11-21, user request; sim-tested, HARDWARE TEST OPEN)
+- Decisions: mirrored home = AVERAGE of both saved poses; STOP pedal stays IMMEDIATE (START/HOME need 3 s hold);
+  margins links 4 cm / grippers 1 cm (gripper-gripper close so two-handed cube work stays possible).
+- Geometry: scripts/duo_geometry.py (numpy FK of both arms in the Duo mount frame + capsule clearance),
+  config/duo_geometry.yaml (GENERATED by scripts/make_duo_geometry.py from franka_description: joint origins, mount base
+  poses, capsules fitted to the FR3 collision STLs - every mesh vertex inside), config/duo_guard.yaml (margins, gripper
+  capsule (estimate: z 0.02..0.17, r 0.065 in the flange frame), base-link pairs ignored, namespace->slot map).
+  FK verified against Franka's ready pose. FINDING: our namespaces are SWAPPED relative to the mount slots (ns left =
+  IP .51 sits in the mount's RIGHT slot): only then are the saved homes collision-free AND the 5 cm height difference at
+  home (left flange 0.445 m vs right 0.496 m) is reproduced. Clearance is not mirror-symmetric (same hardware, not mirrored).
+- gello_gate --other-arm (supervisor sets it; --no-guard to disable; teleop_duo.sh sets it for 2 arms): BARRIER state (both
+  gates wait until both goals are known: each publishes its goal on its command topic) + n x n path check of both straight
+  joint-space ramps; LIVE LiveSmoother.limiter (worst case: own {cmd, robot q} x other {cmd, robot q}; never make the
+  clearance worse, allowed if >= 0); poses already inside the margin (home) are allowed (not worse than start); HOME
+  (target mode) may END inside the margin if the capsules do not touch (end_ok). Other arm's joint states lost -> FAULT.
+  D2 changed on purpose: with one GELLO in its holder the other arm now WAITS at the barrier (never moves alone).
+- Real-data check: over 949 two-arm teleop samples of 2026-11-21, 10.6 % were inside the margin (mostly near home),
+  worst capsule gap -0.8 cm -> the guard would limit rarely. Home poses: saved pair 1.2 cm, mirrored average 1.7 cm
+  (reference=right would give 4.1 cm) between wrist capsules; saved homes differ by 5 cm height, average = level.
+- j4: LIVE soft limit -2.70 (--live-j4-min): left arm hit self_collision_avoidance_violation at j4 -2.83 (twice, B2 test).
+  One-press ERROR RECOVERY: after the arm restart, a robot still in REFLEX gets ONE automatic Franka error recovery.
+- Pedal: scripts/pedal_logic.py (HoldLogic; unit test test/pedal_logic_test.py 17 checks) + demo_pedal.py --hold 3.0
+  --stop-hold 0. Publishes /demo/pedal/hold JSON. Supervisor pre-warms gates in --standby while START/HOME is held
+  (state ARMED: fresh controller instance loaded, nothing relayed, nothing moves), sends go:<token> on /demo/gate_go when
+  the service arrives, cancels if the pedal is released early (status field "arming"). Gate still-time default 0.5 s.
+  GUI should show hold progress (documented in docs/GUI_DEVELOPMENT.md; not implemented: colleagues own the GUI).
+- Home file ~/fr3_tools/fr3_duo_home/home_poses.txt now mirrored (backup .bak next to it, copy in external/).
+- Tests (all sim, 2026-11-21 15:50): gate 160/160 + 15/15 (S17-S24), supervisor 96/96 (T6d-T6g pedal prewarm: START after
+  the hold -> TELEOP in 0.87 s in sim), GUI e2e 33/33, geometry + pedal logic pass.
+- GUI update from Akshay merged (24ff6db + a4fe508: camera page layout, depth picture-in-picture, slide-out status
+  panel, operator grid; origin/features/GUI-development). One conflict (Fix-errors card): kept his layout, our text.
+  test/sim_gui_test.py adapted (show_operator() has no section argument any more). UX note for him: on ERROR the camera
+  display shows the long message twice (title + PROBLEMS), with the log path. GUI does not show pedal-hold progress yet.
+
+## CHANGES AFTER THE 16:00 HARDWARE TEST (2026-11-21; user requests; sim tests PENDING, demo was open)
+- Findings from the test logs: (1) "START: arms not moving" = robots reached the snapshot, then sat in HOLD because the
+  GELLO had moved on during the ramp (needed to come back within 0.08 rad) -> FIXED by CATCH-UP handover (gate
+  --catchup-max 0.6 / --catchup-vel 0.5: LIVE at once, command leaves the snapshot towards the GELLO at 0.5 rad/s;
+  state "LIVE: catching up with the GELLO"; RESYNC only beyond 0.6 rad). (2) Pedal 3 (KEY_F12) holds were cancelled
+  "released early" 5x, never fired: F12 probably sends a quick pulse (ElfKey mode), pedals 1/2 hold fine. NOT FIXED YET:
+  scripts/pedal_probe.py prints raw events (run it with the demo CLOSED: python3 scripts/pedal_probe.py, hold each pedal
+  ~5 s); demo_pedal.py now logs every key DOWN/UP with the held time. If F12 is a pulse, reprogram that pedal in ElfKey
+  (Downloads/SetupElfKey) to a held key, or move the RESET function to a pedal that holds. (3) The LIVE collision limiter
+  was active dozens of times (gripper/gripper 1.0 cm, once -3.5 cm) and kept the arms from coming close: as the user said.
+  The 16:00:01 right-arm reflex (cartesian_reflex, F_ext <= 8.9 at the last 10 Hz sample, dq 1.2) happened while the
+  grippers were at the 1 cm limit; the left "joint states of the right arm lost" FAULT was only a consequence.
+- USER DECISIONS: collision guard ONLY for HOME (not START/LIVE; --guard-teleop to restore); HOME must be collision-free
+  -> scripts/duo_geometry.plan_home: simultaneous / left-first / right-first / via the ready pose, each phase a straight
+  joint-space ramp; supervisor runs the phases (one-arm phase = only that gate, no --other-arm); status "step i/n: ...".
+  Interpretation: the request said "go such that the robots are colliding" = NOT colliding.
+- NEW PEDALS: 1 = START (3 s hold), 2 = stop_home (immediate STOP, a stopped teleop is followed by HOME after 1 s;
+  pressed during HOMING = abort only; in IDLE nothing), 3 = RESET (3 s hold): macro plan stop -> desk (Desk PREPARE if
+  FCI/brakes/mode not ready) -> bringup (if OFFLINE) / recover (if ERROR or REFLEX; restarts a crashed arm stack) -> home
+  -> "reset complete - ready"; refused while any robot is USER_STOPPED (E-stop pressed); STOP aborts it; 300 s limit.
+  Services /demo/stop_home and /demo/reset; status field "reset" = current step. HOME pre-warm no longer exists (pedal
+  3 is RESET); START pre-warm stays.
+- Files: supervisor (make_home_plan, start_home/next_home_phase, start_reset/reset_tick, stop_home, robot_q subscription),
+  gate (catch-up), pedal (mapping + raw log), pedal_probe.py, tests T6f-T6j + T9 (HOME in two phases), S25 (catch-up),
+  S16 now uses a 0.8 rad offset, geometry G-6 (planner).
+- NEXT: close the demo, run the three sim suites, then hardware: START (catch-up), pedal 2, pedal 3 after an E-stop/reflex.
+- PEDAL PROBE RESULT (2026-11-21, scripts/pedal_probe.py): pedal 1 KEY_A held 6.86 s / 195 repeats, pedal 2 KEY_B 6.63 s /
+  188 repeats, pedal 3 KEY_F12 = PULSE (0.02 s, 0 repeats). => RESET on pedal 3 uses TAP-TO-CONFIRM (tap, tap again within
+  5 s; HoldLogic pulse=True, demo_pedal --pulse-keys KEY_F12). KEY_C=reset is also mapped as a normal 3 s hold: reprogram
+  pedal 3 in ElfKey (~/Downloads/SetupElfKey-3.2.1-linux-amd64.tar, ~/elfkey) to letter C in hold mode and the double tap is
+  no longer needed. pedal_logic_test now 23 checks (P8 pulse).
+- SIM RESULTS 2026-11-21 16:57 (after the pedal/guard/planner/catch-up changes): gate 170/170 + 15/15, supervisor 124/124
+  (T6f-T6j pedal 2 / pedal 3 macros, T9 HOME in two phases), GUI e2e 33/33, geometry + pedal logic (23) pass.
+  Pedal 3 was reprogrammed in ElfKey to letter C, continuous mode (KEY_C=reset = normal 3 s hold; F12 tap-to-confirm stays
+  as a fallback). Lesson: sim_gate_driver Arm.state_time() takes arm.lock - never call it inside "with arm.lock:" (deadlock
+  froze the fake GELLO publisher once). HARDWARE TEST OF THE NEW BEHAVIOUR STILL OPEN.
+
+## HARDWARE TEST 2026-11-21 17:07-17:22 (new pedals) + FIXES (sim 17:55: gate 186/186 + 15/15, supervisor 124/124)
+- Worked: pedal 3 as KEY_C hold (5.71 s -> RESET), START -> TELEOP 2.0-3.0 s after the hold for 0.3-0.8 rad ramps, pedal 2
+  stop + HOME after 1 s, second press aborts HOME, RESET after a real reflex (restart arms, HOME in 2 phases left-then-right
+  because the direct paths collided: replayed recorded poses, direct worst -4.3 cm link6/link7; other homings both at once;
+  total 14 s, "reset complete - ready").
+- FIXED: (1) 18 s HOLD wait (offset 0.6-1.0 rad > catch-up limit): --catchup-max 1.5, --catchup-vel 0.8. (2) FAULT "GELLO
+  jumped 3 times in a row" at 17:22:04 = jump guard measured against the last ACCEPTED sample, so a fast smooth flick (0.44,
+  0.57 rad away) counted as 3 jumps: now measured sample to sample (S26 reproduces the quick-onset flick; S7 flip-flop garbage
+  still faults). (3) Supervisor logs "HOME plan: n phase(s): ..." (events/supervisor.log).
+- NOT bugs: right-arm cartesian_reflex 17:12:51 (arms pressed on each other, 15-19 N for 40 s, guard off in teleop by user
+  decision); right REFLEX at bring-up 17:07:28 = leftover of the earlier reflex (RESET clears it).
+
+## CAMERA / GUI CHANGES 2026-11-21 (18:00-18:40; user request)
+- D405 wrist cameras are upside down: GUI rotates both D405 pictures (RGB + depth) by 180 degrees (demo_gui.INVERT, --invert).
+  ASSUMPTION: "both Depth cameras" = the two D405 (RealSense Depth Camera 405), not the ZED.
+- Depth feeds: scripts/depth_view.py (raw 16UC1 mm / 32FC1 m -> colourised JPEG, turbo map trimmed to its bright middle, near red,
+  far blue, black = no data; shrinks first; 10 fps; LAZY: reads the camera only while somebody subscribes). Started per camera by
+  launch/cameras.launch.py: /camera/d405_{1,2}/depth_view/compressed (range 0.10-1.00 m), /zed/zed_node/depth_view/compressed
+  (0.30-3.00 m). demo_gui.CAMERAS 4th field = these topics (GUI depth slots: DEPTH main view, picture-in-picture, head-cam depth).
+  Measured on the real cameras: ~10 Hz, 22-29 kB/frame, converter CPU 17 % / 20 % / 64 % of one core (ZED 1920x1080 float depth
+  is 8 MB x 28 Hz; shrink the ZED publish size with pub_resolution CUSTOM + pub_downscale_factor in a zed params override if
+  ever needed - NOT done, it would also shrink the ZED RGB). D405 #1 still ~10 Hz (USB 2.1 link, known; its profile 848x480x30
+  is rejected at start - harmless).
+- WINDOW SIZE BUG (operator display): LivePage tiles have fixed sizes -> LivePage minimum 1078 px; the MainWindow stack takes the
+  max minimum of all pages -> control window 1173 px high on a 1080 px screen (top not covered, wrist tiles cut at the bottom).
+  FIX: LivePage.minimumSizeHint() = 900x420 (the page re-fits its tiles on resize). test/gui_camera_test.py: window 1920x1080 on
+  all pages, both roles, lowest tile bottom 1072.
+- Tests: test/depth_view_test.py (11), test/gui_camera_test.py (21). The 3 cameras were started only to check topics / rates / CPU
+  (sensors, no robot). One USB dropout of a D405 (ENODEV) happened at the first test launch and did not recur.
+- NOTE for Akshay (GUI owner): demo_gui.py was changed here (CAMERAS depth topics, INVERT + Decoder flip, LivePage.minimumSizeHint,
+  --invert): merge before more GUI work.
+- INCIDENT (my mistake, 18:26:30): I started `cameras.launch.py` for tests WITHOUT checking whether the user's demo was running
+  (it had been started 18:01 and had its own cameras). The two launches fought over the USB cameras: the demo's d405_2 node died
+  ("xioctl(VIDIOC_S_FMT) ... errno=16 Device or resource busy", exit -11) and at 18:26:49 the supervisor logged "cameras stopped -
+  arms unaffected". Robots/grippers unaffected; the demo's camera feeds stayed dead until SHUT DOWN + BRING UP. RULE: before ANY
+  command that opens hardware (cameras, grippers, pedal, GELLO) check `pgrep -af "start_demo|demo_supervisor|realsense2|zed"` first.
+- NOT YET RUN after these GUI/camera changes: test/sim_gui_test.sh (refuses while a demo runs) - run it once the demo is closed.
+
+## HOME PAGE REMOVED FROM THE GUI (2026-11-21, user request)
+- demo_gui.py: HomePage class, HEADLINE/SUBLINE/HOME_LINE, the "Home" tab (LivePage.go_home) and the automatic Home <-> camera
+  switching are gone. MainWindow.LIVE, OPERATOR = 0, 1. Main display ('main' role) starts on the camera page with the ROBO STATUS
+  closed; second screen ('camera' role) starts on the camera page with the status OPEN (LivePage.set_status_open(on, animate=False)).
+  Operator "Back" -> camera page; teleop start while the Operator page is open -> camera page.
+- Side effect to know: the problem bar was only on the Home/Operator pages, so on the main display (status closed) an ERROR is
+  not visible until STATUS is opened (the second screen shows it). Offered to the user: auto-open the status on ERROR.
+- Tests adapted: test/gui_camera_test.py (C-3 pages, new C-4 "no Home page", 36 checks, PASS), test/sim_gui_test.py (G1-G6 expectations).
+  GUI end-to-end simulation (test/sim_gui_test.sh) NOT YET RUN for this change: a real demo (arms + grippers) was running.
+

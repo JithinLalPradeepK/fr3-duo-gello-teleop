@@ -19,18 +19,47 @@ States:
   WAIT_STILL  GELLO OUT OF ITS HOLDER and still (< still_tol over still_time) and robot data fresh,
               else REFUSED after wait_timeout. While the GELLO is in its holder (every joint within
               holder_tol of the recorded holder pose, config/gello_holder_poses.yaml) the robot never moves.
-  -> if the snapshot is outside the FR3 joint limits (minus limit_margin): REFUSED
+              A still GELLO pose within limit_margin of an FR3 joint limit is not taken: the gate keeps
+              waiting with "move GELLO jN away from its joint limit" (REFUSED only at wait_timeout).
   -> (optional) if any |gello - robot| > max_start_diff: REFUSED (default: off)
   -> snapshot GELLO; relay snapshot (re-stamped, relay_hz) BEFORE activation;
      fresh controller instance (unload/load/configure), wait until DDS matched its subscription;
      activate (STRICT)
   MOVING      controller ramps to snapshot (speed factor 0.2); at least min_moving_time;
               FAULT after move_timeout
-  HOLD        robot within converge_tol of snapshot; wait for live GELLO within live_tol of snapshot
-  LIVE        relay live GELLO (+ gripper). Jump guard: steps > jump_tol not relayed, 3 in a row = FAULT
+  HOLD        robot within converge_tol of snapshot. Live GELLO within live_tol -> LIVE. Within catchup_max (default
+              1.5 rad: the operator started moving while the robot was still ramping) -> LIVE at once with a
+              CATCH-UP: the smoothed command leaves the snapshot towards the live GELLO at catchup_vel (0.8 rad/s)
+              until it is within 0.03 rad ("LIVE: catching up with the GELLO"), then normal speed. Further away: wait
+              here; RESYNC: if the GELLO is held still out of its holder for resync_time, deactivate (robot holds),
+              take the new GELLO pose as snapshot and ramp again (fresh instance).
+  LIVE        relay live GELLO (+ gripper), SMOOTHED: GELLO arrives at ~25 Hz; raw samples made the controller
+              target jump every 40 ms (K = 240 Nm/rad -> torque steps). Each sample starts a linear segment
+              from the current output to the sample over the measured sample interval (one sample of delay),
+              published at live_hz, every joint capped at live_max_vel AND at live_vel_frac of the FR3
+              position-dependent speed limit, and clamped limit_margin inside the usable range (Q_MIN/Q_MAX:
+              URDF limits and where that speed limit reaches zero) and at live_j4_min for j4 (self-collision zone,
+              default -2.70). The clamp acts on the desired value, so a snapshot outside it is pulled in at
+              the capped speed. --live-hz 0 = old raw relay (no clamp).
+              Jump guard: a step > jump_tol between two consecutive GELLO samples is not used, 3 in a row = FAULT
 TARGET MODE (HOME): --target-joints q1,..,q7 - no GELLO, no holder check, no LIVE: the same fresh-instance +
   snapshot-relay + ramp path drives the arm to the given pose; once converged it holds for target_hold s,
   deactivates (robot holds) and exits 0 with state DONE.
+STANDBY (--standby --go-token T; used by the supervisor while a START / HOME pedal is being held): the gate does
+  everything that takes time WITHOUT touching the robot - start-up, DDS discovery, loading a fresh (inactive)
+  controller instance - and waits in state ARMED. Only the message "go:T" on /demo/gate_go lets it continue with the
+  normal sequence (WAIT_STILL -> BARRIER -> activation ...), so nothing moves before the long press is complete.
+  No GO within standby_timeout -> exit 0 (nothing was done). Saves ~2.5 s between pedal and LIVE.
+DUO COLLISION GUARD (--other-arm <arm>, set by the supervisor for both gates; scripts/duo_geometry.py,
+config/duo_guard.yaml; FR3 Duo kinematics + capsules fitted to the FR3 collision meshes):
+  BARRIER     before any motion both gates wait until both arms' goals are known (each gate publishes its goal on
+              its own command topic, which the other reads), then check the straight joint-space ramps of BOTH arms
+              against each other (all pairs of path fractions: the arms' relative speed is unknown). A path that
+              would bring the arms closer than the margin (links 4 cm, grippers 1 cm) -> REFUSED. A pose that is
+              already inside the margin (home) is allowed as long as the path does not make it worse.
+  LIVE        every smoothed command step that would reduce the clearance below the margin (worst case over the
+              commanded AND the actual poses of both arms, since the robot lags its command) is shortened or held:
+              state "LIVE: limited by the collision guard (...)". Moving away is always allowed.
 Exclusive output: the gate refuses to start if anything else publishes /<arm>/gello/joint_states
   (a second gate, or a GELLO publisher wired straight to the controller), and FAULTs if one appears later.
 Any FAULT, stale data (> stale_timeout), external deactivation, SIGINT or SIGTERM:
@@ -57,12 +86,36 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32, String
 import yaml
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from duo_geometry import DuoGeometry, describe  # noqa: E402
+
 CONTROLLER = 'joint_impedance_controller'
 GELLO_NAMES = [f'fr3_joint{i}' for i in range(1, 8)]
 EXIT_STOPPED, EXIT_REFUSED, EXIT_FAULT, EXIT_DEACT_FAILED, EXIT_STARTUP = 0, 2, 3, 4, 5
 # FR3 joint limits from franka_description 1.3.0 robots/fr3/joint_limits.yaml
 FR3_Q_MIN = [-2.9007, -1.8361, -2.9007, -3.0770, -2.8763, 0.4398, -3.0508]
 FR3_Q_MAX = [2.9007, 1.8361, 2.9007, -0.1169, 2.8763, 4.6216, 3.0508]
+# FR3 POSITION-DEPENDENT joint velocity limits (libfranka 0.18.2 include/franka/rate_limiting.h, without the
+# small tolerance): upper(q) = min(vmax, max(0, -o + sqrt(k (hi - q)))), lower(q) = max(-vmax, min(0, o - sqrt(k (q - lo)))).
+# Near a joint limit the allowed speed goes to ZERO (j4 below -3.037 any downward motion -> joint_velocity_violation,
+# seen on the left arm 2026-11-21). Per joint: (vmax, k, o, lo, hi).
+FR3_VEL = [(2.62, 12.0, 0.30, -2.75010, 2.75010), (2.62, 5.17, 0.20, -1.79180, 1.79180),
+           (2.62, 7.00, 0.20, -2.90650, 2.90650), (2.62, 8.00, 0.30, -3.04810, -0.14580),
+           (5.26, 34.0, 0.35, -2.81010, 2.81010), (4.18, 11.0, 0.35, 0.54092, 4.52050),
+           (5.26, 34.0, 0.35, -3.01960, 3.01960)]
+# usable position range = URDF limits intersected with where the velocity limit is still > 0
+Q_MIN = [max(u, lo + o * o / k) for u, (_, k, o, lo, _) in zip(FR3_Q_MIN, FR3_VEL)]
+Q_MAX = [min(u, hi - o * o / k) for u, (_, k, o, _, hi) in zip(FR3_Q_MAX, FR3_VEL)]
+
+
+def fr3_vel_limit(j, q, direction):
+    """Allowed |speed| of joint j at position q when moving in direction (+1 / -1)."""
+    vmax, k, o, lo, hi = FR3_VEL[j]
+    if direction >= 0:
+        return min(vmax, max(0.0, -o + math.sqrt(max(0.0, k * (hi - q)))))
+    return min(vmax, max(0.0, -o + math.sqrt(max(0.0, k * (q - lo)))))
+
+
 DEFAULT_HOLDER_FILE = os.path.expanduser('~/robot_demo/config/gello_holder_poses.yaml')
 
 
@@ -94,6 +147,55 @@ def fmt(q):
     return '[' + ', '.join(f'{x:+.3f}' for x in q) + ']'
 
 
+class LiveSmoother:
+    """LIVE command shaping: linear segment from the current output to each new GELLO sample, lasting the
+    expected sample interval (EMA of measured intervals), sampled at the publish rate and rate-limited."""
+
+    def __init__(self, q0, max_vel, now, period=0.04, vel_frac=0.5, margin=0.1, soft_min=None):
+        self.vel_frac = vel_frac        # share of the FR3 position-dependent speed limit the command may use
+        self.lo = [x + margin for x in Q_MIN]
+        self.hi = [x - margin for x in Q_MAX]
+        for j, v in (soft_min or {}).items():     # soft limits inside the usable range (self-collision zones)
+            self.lo[j] = max(self.lo[j], v)
+        self.y = list(q0)
+        self.start, self.goal = list(q0), list(q0)
+        self.t_seg = self.t_out = now
+        self.t_sample = None
+        self.period = period
+        self.max_vel = max_vel
+        self.catching = False           # catch-up after the HOLD: slower speed cap until close to the live GELLO
+        self.catch_vel = max_vel
+        self.limiter = None             # optional hook(y_old, y_new) -> y (duo collision guard)
+
+    def sample(self, q, now):
+        if self.t_sample is not None:
+            dt = now - self.t_sample
+            if 0.005 < dt < 0.2:
+                self.period = min(0.1, max(0.005, 0.8 * self.period + 0.2 * dt))
+        self.t_sample = now
+        self.start, self.goal, self.t_seg = list(self.y), list(q), now
+
+    def step(self, now):
+        dt = min(0.05, max(0.0, now - self.t_out))
+        self.t_out = now
+        a = min(1.0, (now - self.t_seg) / self.period)
+        out = []
+        for j, (y, s, g) in enumerate(zip(self.y, self.start, self.goal)):
+            # clamp the DESIRED value, then rate-limit towards it: a snapshot outside a soft limit is pulled
+            # in at the capped speed instead of being snapped (which would be a torque step)
+            want = min(self.hi[j], max(self.lo[j], s + a * (g - s)))
+            d = want - y
+            vmax = self.catch_vel if self.catching else self.max_vel
+            lim = min(vmax, self.vel_frac * fr3_vel_limit(j, y, 1 if d >= 0 else -1)) * dt
+            out.append(y + min(lim, max(-lim, d)))
+        if self.limiter is not None:
+            out = self.limiter(self.y, out)
+        self.y = out
+        if self.catching and max(abs(y - g) for y, g in zip(out, self.goal)) < 0.03:
+            self.catching = False
+        return self.y
+
+
 class GelloGate(Node):
     def __init__(self, a):
         super().__init__('gello_gate', namespace=a.arm)
@@ -109,6 +211,19 @@ class GelloGate(Node):
         self.robot = None               # (t_monotonic, [7])
         self.robot_idx = None
         self.last_relayed = None
+        self.go_ok = False              # standby: GO received
+        self.preloaded = False          # a fresh inactive controller instance is already loaded + DDS-matched
+        self.geo = None                 # DuoGeometry when the collision guard is on (--other-arm)
+        self.other_q = self.other_cmd = None      # (t_monotonic, [7]) of the other arm: robot / commanded
+        self.other_state = ''
+        self.other_idx = None
+        self.guard_hit_t = 0.0          # last time the LIVE limiter changed a command
+        self.guard_flag = False
+        self.guard_info = ''
+        self.cap_cache = {}
+        self.last_sample = None         # LIVE: last accepted GELLO sample (jump guard reference)
+        self.smoother = None            # LIVE: LiveSmoother when live_hz > 0
+        self.next_live = 0.0
         self.jumps = 0
         self.holder = None if a.no_holder_check else load_holder_pose(a.holder_file, a.arm)
         self.target = a.target_joints     # None = normal GELLO teleop
@@ -133,6 +248,17 @@ class GelloGate(Node):
         self.create_subscription(Float32, f'/gello_check_{a.arm}/gripper/gripper_client/'
                                  'target_gripper_width_percent', self.on_gripper, 10)
         self.create_subscription(JointState, f'/{a.arm}/franka/joint_states', self.on_robot, 10)
+        if a.standby:
+            self.create_subscription(String, '/demo/gate_go', self.on_go, latched)
+        if a.other_arm:
+            if a.other_arm == a.arm:
+                raise SystemExit('--other-arm must be the other arm')
+            self.geo = DuoGeometry(guard_file=a.guard_config)
+            o = a.other_arm
+            self.create_subscription(JointState, f'/{o}/franka/joint_states', self.on_other_robot, 10)
+            self.create_subscription(JointState, f'/{o}/gello/joint_states', self.on_other_cmd, 100)
+            self.create_subscription(String, f'/{o}/gello_gate/state',
+                                     lambda m: setattr(self, 'other_state', m.data), latched)
         # strong ref: Node.executor is a weakref property (assigning it lost the executor)
         self._exec = SingleThreadedExecutor()
         self._exec.add_node(self)
@@ -154,9 +280,14 @@ class GelloGate(Node):
         self.last_relayed = list(q)
 
     def relay_tick(self):
-        if self.relay_target is not None and time.monotonic() >= self.next_relay:
-            self.next_relay = time.monotonic() + 1.0 / self.a.relay_hz
-            self.publish_cmd(self.relay_target)
+        now = time.monotonic()
+        if self.relay_target is not None:
+            if now >= self.next_relay:
+                self.next_relay = now + 1.0 / self.a.relay_hz
+                self.publish_cmd(self.relay_target)
+        elif self.smoother is not None and self.activated and now >= self.next_live:
+            self.next_live = max(self.next_live + 1.0 / self.a.live_hz, now - 0.01)
+            self.publish_cmd(self.smoother.step(now))
 
     def spin_for(self, seconds):
         """Spin callbacks and keep relaying; raises StopRequested on signal."""
@@ -222,6 +353,25 @@ class GelloGate(Node):
             self.get_logger().info(f'robot joints: {[msg.name[i] for i in idx]}')
         self.robot = (time.monotonic(), [msg.position[i] for i in self.robot_idx])
 
+    def on_go(self, msg):
+        if msg.data == f'go:{self.a.go_token}':
+            self.go_ok = True
+
+    def on_other_robot(self, msg):
+        if self.other_idx is None:
+            idx = []
+            for jn in GELLO_NAMES:
+                hits = [i for i, n in enumerate(msg.name) if n.endswith(jn)]
+                if len(hits) != 1:
+                    return
+                idx.append(hits[0])
+            self.other_idx = idx
+        self.other_q = (time.monotonic(), [msg.position[i] for i in self.other_idx])
+
+    def on_other_cmd(self, msg):
+        if len(msg.position) >= 7:
+            self.other_cmd = (time.monotonic(), list(msg.position[:7]))
+
     def on_gello(self, msg):
         if len(msg.position) < 7:
             return
@@ -231,14 +381,21 @@ class GelloGate(Node):
         self.gello_hist.append((now, q))
         while self.gello_hist and now - self.gello_hist[0][0] > self.a.still_time + 0.2:
             self.gello_hist.popleft()
-        if self.state == 'LIVE' and self.activated:
-            step = maxabs(q, self.last_relayed) if self.last_relayed else 0.0
+        if self.state == 'LIVE' and self.activated and not self.stopping:
+            # Sample-to-sample step (NOT versus the last accepted sample: a fast but smooth flick drifts away from it
+            # and was counted as 3 jumps in a row, 2026-11-21). 0.3 rad in 40 ms = 7.5 rad/s: not a human, a glitch.
+            # The smoother caps the command speed anyway, so a glitch that stays is simply followed at that speed.
+            step = maxabs(q, self.last_sample) if self.last_sample else 0.0
+            self.last_sample = q
             if step > self.a.jump_tol:
                 self.jumps += 1
-                self.get_logger().warn(f'GELLO jump {step:.3f} rad not relayed ({self.jumps}/3)')
+                self.get_logger().warn(f'GELLO jump {step:.3f} rad between two samples not relayed ({self.jumps}/3)')
                 return
             self.jumps = 0
-            self.publish_cmd(q)   # fresh stamp: staleness is checked by us (stale_timeout)
+            if self.smoother is not None:
+                self.smoother.sample(q, now)     # published by relay_tick at live_hz
+            else:
+                self.publish_cmd(q)   # fresh stamp: staleness is checked by us (stale_timeout)
 
     def on_gripper(self, msg):
         if self.state == 'LIVE' and self.activated:
@@ -269,6 +426,93 @@ class GelloGate(Node):
             raise GateError(EXIT_FAULT, 'GELLO data lost')
         if not self.fresh(self.robot, now):
             raise GateError(EXIT_FAULT, 'robot joint states lost')
+        if self.geo is not None and not self.fresh(self.other_q, now):
+            raise GateError(EXIT_FAULT, f'joint states of the {self.a.other_arm} arm lost (collision guard)')
+
+    # ------------------------------------------------------------------ duo collision guard
+    BARRIER_READY = ('BARRIER', 'ACTIVATING', 'MOVING', 'HOLD', 'LIVE', 'RESYNC')
+
+    def pair_args(self, own_caps, other_caps):
+        return (own_caps, other_caps) if self.a.arm == 'left' else (other_caps, own_caps)
+
+    def guard_barrier(self, own_goal, what):
+        """Wait until the other arm's goal is known too, then check both ramps against each other."""
+        if self.geo is None:
+            return
+        a = self.a
+        self.relay_target = list(own_goal)            # the other gate reads our goal from the command topic
+        self.set_state('BARRIER', 'waiting for the other arm (collision check)')
+        t0 = time.monotonic()
+        while True:
+            self.check_streams()
+            if (self.other_state.split(':')[0] in self.BARRIER_READY and self.fresh(self.other_cmd)
+                    and self.fresh(self.other_q)):
+                break
+            if time.monotonic() - t0 > a.wait_timeout:
+                raise GateError(EXIT_REFUSED, f'the {a.other_arm} arm is not ready within {a.wait_timeout:.0f} s '
+                                f'(its gate says "{self.other_state or "not running"}"), so the arms cannot be '
+                                'checked against each other')
+            self.spin_for(0.01)
+        own0, other0, other1 = list(self.robot[1]), list(self.other_q[1]), list(self.other_cmd[1])
+        ql0, ql1, qr0, qr1 = ((own0, own_goal, other0, other1) if a.arm == 'left'
+                              else (other0, other1, own0, own_goal))
+        # HOME (target mode): the target pose is chosen on purpose and may sit inside the margin (the home poses do)
+        hit = self.geo.path_collision(ql0, ql1, qr0, qr1, n=a.guard_samples, end_ok=self.target is not None)
+        if hit is not None:
+            c, info, fl, fr = hit
+            raise GateError(EXIT_REFUSED, f'{what}: the arms would collide on the way - {describe(info)} '
+                            f'(at {fl * 100:.0f} % of the left and {fr * 100:.0f} % of the right ramp). '
+                            'Move the GELLOs so that the arms do not cross, or bring the arms apart first')
+        self.get_logger().info(f'collision check passed ({what}); tightest margin on the way not worse than start')
+
+    def own_caps(self, q):
+        return self.geo.world_capsules(self.a.arm, q)
+
+    def guard_clear(self, y):
+        """Worst-case clearance: own {command y, actual robot pose} x other {commanded, actual pose}."""
+        now = time.monotonic()
+        others = []
+        for src in (self.other_q, self.other_cmd):
+            if self.fresh(src, now):
+                key = id(src)
+                if key not in self.cap_cache:
+                    self.cap_cache = {k: v for k, v in self.cap_cache.items() if k in (id(self.other_q), id(self.other_cmd))}
+                    self.cap_cache[key] = self.geo.world_capsules(self.a.other_arm, src[1])
+                others.append(self.cap_cache[key])
+        owns = [self.own_caps(y)]
+        if self.fresh(self.robot, now):
+            key = ('own', id(self.robot))
+            if key not in self.cap_cache:
+                self.cap_cache = {k: v for k, v in self.cap_cache.items() if not (isinstance(k, tuple) and k[0] == 'own')}
+                self.cap_cache[key] = self.own_caps(self.robot[1])
+            owns.append(self.cap_cache[key])
+        worst = None
+        for oc in owns:
+            for xc in others:
+                c, info = self.geo.clearance_between(*self.pair_args(oc, xc))
+                if worst is None or c < worst[0]:
+                    worst = (c, info)
+        return worst
+
+    def guard_limit(self, y_old, y_new):
+        """LiveSmoother hook: never make the worst-case clearance worse than it is, unless it stays >= 0."""
+        w = self.guard_clear(y_new)
+        if w is None or w[0] >= 0.0:
+            return y_new
+        old = self.guard_clear(y_old)
+        c_old = old[0] if old else -1.0
+        if w[0] >= c_old - 1e-4:
+            return y_new
+        out = y_old
+        for frac in (0.5, 0.25, 0.1):
+            y = [o + frac * (n - o) for o, n in zip(y_old, y_new)]
+            c = self.guard_clear(y)
+            if c is None or c[0] >= 0.0 or c[0] >= c_old - 1e-4:
+                out = y
+                break
+        self.guard_hit_t = time.monotonic()
+        self.guard_info = describe(w[1])
+        return out
 
     # ------------------------------------------------------------------ main sequence
     def run(self):
@@ -287,6 +531,8 @@ class GelloGate(Node):
             raise GateError(EXIT_REFUSED, f'{self.other_publishers()} other publisher(s) on '
                             f'{self.pub_cmd.topic_name} (another gate, or GELLO wired straight to the '
                             'controller?) - not starting')
+        if a.standby:
+            self.standby_wait()
         if self.target is not None:
             return self.run_target()
         if self.holder is None and not a.no_holder_check:
@@ -302,15 +548,19 @@ class GelloGate(Node):
                 raise GateError(EXIT_REFUSED, f'another publisher appeared on {self.pub_cmd.topic_name}')
             fresh_g = self.fresh(self.gello)
             holder = fresh_g and self.in_holder(self.gello[1])
-            if fresh_g and not holder and self.gello_still() and self.fresh(self.robot):
+            still = fresh_g and not holder and self.gello_still()
+            near = self.near_limits(self.gello[1]) if still else []
+            if still and not near and self.fresh(self.robot):
                 break
-            hint = 'GELLO in holder - robot will not move' if holder else 'hold GELLO still'
+            hint = 'GELLO in holder - robot will not move' if holder else \
+                f'move GELLO {" and ".join(near)} away from its joint limit' if near else 'hold GELLO still'
             if hint != last_hint:
                 last_hint = hint
                 self.set_state('WAIT_STILL', hint)
             if time.monotonic() - t0 > a.wait_timeout:
                 why = 'no GELLO data' if not fresh_g else \
                     'GELLO stayed in its holder' if holder else \
+                    f'GELLO stayed near the joint limit of {" and ".join(near)}' if near else \
                     'no robot data' if not self.fresh(self.robot) else 'GELLO not still'
                 raise GateError(EXIT_REFUSED, f'{why} within {a.wait_timeout:.0f} s')
             self.spin_for(0.01)
@@ -325,26 +575,56 @@ class GelloGate(Node):
             raise GateError(EXIT_REFUSED, f'GELLO too far from robot (> {a.max_start_diff} rad): '
                             f'{bad}. Match GELLO to the robot and START again.')
 
+        self.guard_barrier(snapshot, 'START')
         self.set_state('ACTIVATING', f'max diff {max(diff):.3f} rad')
         self.activate_and_move(snapshot, 'GELLO snapshot')
 
         # -- HOLD
         self.set_state('HOLD', f'robot at snapshot; move GELLO within {a.live_tol} rad to go LIVE')
         last_hint = time.monotonic()
-        while maxabs(self.gello[1], snapshot) > a.live_tol:
+        t_still_off = None               # since when the GELLO is held still, out of holder, off the snapshot
+        while maxabs(self.gello[1], snapshot) > max(a.live_tol, a.catchup_max):
             self.check_streams()
-            if time.monotonic() - last_hint > 2.0:
-                last_hint = time.monotonic()
+            now = time.monotonic()
+            if a.resync_time > 0 and not self.in_holder(self.gello[1]) and self.gello_still() \
+                    and not self.near_limits(self.gello[1]) \
+                    and maxabs(self.gello[1], self.robot[1]) <= a.max_start_diff:
+                t_still_off = t_still_off or now
+                if now - t_still_off >= a.resync_time:
+                    new = list(self.gello[1])
+                    self.set_state('RESYNC', f'GELLO held {maxabs(new, snapshot):.2f} rad away from the robot - '
+                                   'ramping to the new GELLO pose')
+                    self.get_logger().info(f'RESYNC GELLO {fmt(new)}\n          robot {fmt(self.robot[1])}')
+                    if not self.deactivate(final=False):
+                        raise GateError(EXIT_FAULT, 'RESYNC: deactivation failed')
+                    snapshot = new
+                    self.guard_barrier(snapshot, 'RESYNC')
+                    self.set_state('ACTIVATING', f'resync, max diff {maxabs(snapshot, self.robot[1]):.3f} rad')
+                    self.activate_and_move(snapshot, 'new GELLO snapshot')
+                    self.set_state('HOLD', f'robot at new snapshot; move GELLO within {a.live_tol} rad to go LIVE')
+                    t_still_off = None
+                    last_hint = time.monotonic()
+                    continue
+            else:
+                t_still_off = None
+            if now - last_hint > 2.0:
+                last_hint = now
                 d = [g - s for g, s in zip(self.gello[1], snapshot)]
                 far = ', '.join(f'j{i + 1} {x:+.2f}' for i, x in enumerate(d) if abs(x) > a.live_tol)
                 self.set_state('HOLD', f'GELLO off snapshot: {far}')
             self.spin_for(0.01)
-        self.run_live(snapshot)
+        self.run_live(snapshot, catchup=maxabs(self.gello[1], snapshot) > a.live_tol)
+
+    def near_limits(self, q):
+        """Joints (e.g. ['j4']) within limit_margin of an FR3 joint limit."""
+        m = self.a.limit_margin
+        return [f'j{i + 1}' for i, (x, lo, hi) in enumerate(zip(q, Q_MIN, Q_MAX))
+                if not lo + m <= x <= hi - m]
 
     def check_limits(self, q, what):
         a = self.a
         out = [f'j{i + 1} {x:+.3f} not in [{lo + a.limit_margin:+.3f}, {hi - a.limit_margin:+.3f}]'
-               for i, (x, lo, hi) in enumerate(zip(q, FR3_Q_MIN, FR3_Q_MAX))
+               for i, (x, lo, hi) in enumerate(zip(q, Q_MIN, Q_MAX))
                if not lo + a.limit_margin <= x <= hi - a.limit_margin]
         if out:
             raise GateError(EXIT_REFUSED, f'{what} outside FR3 joint limits: ' + ', '.join(out))
@@ -362,6 +642,7 @@ class GelloGate(Node):
             self.spin_for(0.01)
         diff = maxabs(target, self.robot[1])
         self.get_logger().info(f'target {fmt(target)}\n          robot  {fmt(self.robot[1])}')
+        self.guard_barrier(target, 'HOME')
         self.set_state('ACTIVATING', f'target mode, max diff {diff:.3f} rad')
         self.activate_and_move(target, 'target pose')
         self.set_state('HOLD', f'at target pose, holding {a.target_hold:.1f} s')
@@ -371,11 +652,11 @@ class GelloGate(Node):
             self.spin_for(0.01)
         self.done = True              # main() deactivates -> robot holds at the target
 
-    def activate_and_move(self, snapshot, what):
-        """Relay snapshot BEFORE activation, fresh controller instance, activate, ramp until converged."""
-        a = self.a
-        self.relay_target = snapshot
-        self.spin_for(0.2)
+    def load_fresh_controller(self):
+        """Unload the used controller instance and load + configure a FRESH one (inactive): the stock controller only
+        resets its ramp flags in the constructor, so every activation needs a new instance. Waits until DDS has
+        matched the new instance's subscription (it subscribes in on_configure) - otherwise it could miss the
+        snapshot and initialise its ramp on later (live) data."""
         n_subs = self.pub_cmd.get_subscription_count()   # includes the old controller instance
         self.call('unload', UnloadController.Request(name=CONTROLLER))
         self.wait_subs(lambda n: n < n_subs, 'old controller subscription to disappear')
@@ -385,10 +666,35 @@ class GelloGate(Node):
             raise GateError(EXIT_FAULT, 'configure_controller failed')
         if self.controller_states().get(CONTROLLER) != 'inactive':
             raise GateError(EXIT_FAULT, 'reloaded controller is not inactive')
-        # The new instance subscribes in on_configure: make sure DDS has matched it before activating,
-        # otherwise it misses the snapshot and initialises its ramp on later (live) data.
         self.wait_subs(lambda n: n >= n_subs, 'new controller subscription to match')
-        self.spin_for(0.2)
+
+    def standby_wait(self):
+        """Pre-load a fresh controller instance, then wait for GO (nothing moves, nothing is relayed)."""
+        self.load_fresh_controller()
+        self.preloaded = True
+        self.set_state('ARMED', 'ready, waiting for GO')
+        t0 = time.monotonic()
+        while not self.go_ok:
+            self.check_streams()
+            if time.monotonic() - t0 > self.a.standby_timeout:
+                self.get_logger().info(f'no GO within {self.a.standby_timeout:.0f} s - leaving standby')
+                raise StopRequested()
+            self.spin_for(0.01)
+        self.get_logger().info(f'GO after {time.monotonic() - t0:.1f} s in standby')
+        self.set_state('WAIT_STILL', 'take GELLO out of its holder and hold it still' if self.target is None
+                       else 'waiting for robot data')
+
+    def activate_and_move(self, snapshot, what):
+        """Relay snapshot BEFORE activation, fresh controller instance, activate, ramp until converged."""
+        a = self.a
+        self.relay_target = snapshot
+        if self.preloaded:                  # standby already loaded a fresh instance and DDS-matched it
+            self.preloaded = False
+            self.spin_for(0.3)              # the instance sees the snapshot for 0.3 s before it is activated
+        else:
+            self.spin_for(0.2)
+            self.load_fresh_controller()
+            self.spin_for(0.2)
         self.check_streams()
         self.activated = True           # set first: if the call times out we still deactivate
         if not self.switch(activate=[CONTROLLER]):
@@ -405,11 +711,24 @@ class GelloGate(Node):
                                 f'(err {maxabs(self.robot[1], snapshot):.3f} rad)')
             self.spin_for(0.01)
 
-    def run_live(self, snapshot):
+    def run_live(self, snapshot, catchup=False):
         # -- LIVE (on_gello relays from here on)
         self.last_relayed = list(snapshot)
+        self.last_sample = list(snapshot)
+        if self.a.live_hz > 0:
+            self.smoother = LiveSmoother(snapshot, self.a.live_max_vel, time.monotonic(),
+                                         vel_frac=self.a.live_vel_frac, margin=self.a.limit_margin,
+                                         soft_min={3: self.a.live_j4_min})
+            self.next_live = time.monotonic()
+            if catchup:                  # the GELLO moved on while the robot ramped: follow it, slowly at first
+                self.smoother.catching, self.smoother.catch_vel = True, self.a.catchup_vel
+                self.last_sample = list(self.gello[1])      # (jump guard: steps are measured sample to sample)
+                self.smoother.sample(list(self.gello[1]), time.monotonic())
+            if self.geo is not None:
+                self.smoother.limiter = self.guard_limit
         self.relay_target = None
-        self.set_state('LIVE')
+        catching = self.smoother is not None and self.smoother.catching
+        self.set_state('LIVE', 'catching up with the GELLO' if catching else '')
         next_check = time.monotonic() + 1.0
         while True:
             self.check_streams()
@@ -422,13 +741,36 @@ class GelloGate(Node):
                     self.activated = False
                     raise GateError(EXIT_FAULT, f'{CONTROLLER} is "{st}" (deactivated externally?)')
             self.spin_for(0.01)
+            if catching and not self.smoother.catching:
+                catching = False
+                self.set_state('LIVE')
+            if self.geo is not None:
+                limited = time.monotonic() - self.guard_hit_t < 0.5
+                if limited and not self.guard_flag:
+                    self.guard_flag = True
+                    self.set_state('LIVE', f'limited by the collision guard ({self.guard_info})')
+                elif not limited and self.guard_flag:
+                    self.guard_flag = False
+                    self.set_state('LIVE')
 
-    def deactivate(self):
-        """Hold the robot where it is and deactivate the controller. Returns True if done/needed-not."""
+    def deactivate(self, final=True):
+        """Hold the robot where it is and deactivate the controller. Returns True if done/needed-not.
+        final=False (RESYNC): afterwards signals interrupt again, and a pending one raises StopRequested."""
         if not self.activated:
             return True
         self.stopping = True
-        self.set_state('STOPPING', 'deactivating controller')
+        self.smoother = None
+        if final:
+            self.set_state('STOPPING', 'deactivating controller')
+        try:
+            return self._deactivate()
+        finally:
+            if not final:
+                self.stopping = False
+                if self.stop_requested:
+                    raise StopRequested()
+
+    def _deactivate(self):
         if self.fresh(self.robot):
             self.relay_target = list(self.robot[1])
         elif self.last_relayed is not None:
@@ -451,7 +793,11 @@ def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument('--arm', required=True, choices=['left', 'right'])
     p.add_argument('--still-tol', type=float, default=0.03)
-    p.add_argument('--still-time', type=float, default=1.0,
+    p.add_argument('--standby', action='store_true',
+                   help='pre-warm and wait in state ARMED until "go:<token>" arrives on /demo/gate_go')
+    p.add_argument('--go-token', default='', help='token the GO message must carry (supervisor sets one per START)')
+    p.add_argument('--standby-timeout', type=float, default=20.0, help='leave standby (exit 0) after this long')
+    p.add_argument('--still-time', type=float, default=0.5,
                    help='GELLO must be still this long before the snapshot (avoids snapshots mid-lift)')
     p.add_argument('--max-start-diff', type=float, default=math.inf,
                    help='optional extra limit on |gello - robot| per joint (default: off)')
@@ -460,7 +806,8 @@ def parse_args(argv):
                    help='GELLO counts as "in holder" if every joint is within this of the holder pose')
     p.add_argument('--no-holder-check', action='store_true', help='sim tests only')
     p.add_argument('--limit-margin', type=float, default=0.1,
-                   help='refuse snapshots closer than this to an FR3 joint limit')
+                   help='keep this distance from the usable FR3 range (URDF limits and the zone where the '
+                        'position-dependent speed limit is zero): no snapshot there, LIVE commands clamped')
     p.add_argument('--converge-tol', type=float, default=0.05)
     p.add_argument('--live-tol', type=float, default=0.08)
     p.add_argument('--wait-timeout', type=float, default=30.0)
@@ -470,11 +817,35 @@ def parse_args(argv):
     p.add_argument('--stale-timeout', type=float, default=0.3)
     p.add_argument('--jump-tol', type=float, default=0.3)
     p.add_argument('--relay-hz', type=float, default=100.0)
+    p.add_argument('--live-hz', type=float, default=200.0,
+                   help='LIVE: publish rate of the smoothed GELLO command (0 = relay raw samples, old behaviour)')
+    p.add_argument('--live-max-vel', type=float, default=2.0,
+                   help='LIVE: max commanded joint speed [rad/s] (FR3 limits: 2.62 j1-j4, 5.26 j5-j7)')
+    p.add_argument('--other-arm', choices=['left', 'right'], default=None,
+                   help='enable the duo collision guard against this arm (the supervisor sets it for both gates)')
+    p.add_argument('--guard-config', default=None, help='duo_guard.yaml (default: config/duo_guard.yaml)')
+    p.add_argument('--guard-samples', type=int, default=10,
+                   help='path check: n x n grid of path fractions of the two ramps')
+    p.add_argument('--live-j4-min', type=float, default=-2.70,
+                   help='LIVE: soft lower limit for j4 [rad]. The left arm hit self_collision_avoidance_violation '
+                        'at j4 -2.83 (2026-11-21), before the usable range ends at -2.937 (use -9 to disable)')
+    p.add_argument('--catchup-max', type=float, default=1.5,
+                   help='HOLD: GELLO this far (rad) from the snapshot still goes LIVE, with a slow catch-up')
+    p.add_argument('--catchup-vel', type=float, default=0.8,
+                   help='catch-up speed cap [rad/s] until the command is within 0.03 rad of the GELLO')
+    p.add_argument('--live-vel-frac', type=float, default=0.5,
+                   help='LIVE: command uses at most this share of the FR3 position-dependent speed limit')
+    p.add_argument('--resync-time', type=float, default=2.0,
+                   help='HOLD: GELLO held still this long off the snapshot -> ramp to the new pose (0 = off)')
     p.add_argument('--target-joints', type=lambda s: [float(x) for x in s.split(',')], default=None,
                    help='TARGET MODE (HOME): q1,..,q7 in rad; no GELLO, no LIVE')
     p.add_argument('--target-hold', type=float, default=1.0,
                    help='target mode: hold at the target this long before deactivating')
     a = p.parse_args(argv)
+    if a.standby and not a.go_token:
+        p.error('--standby needs --go-token')
+    if a.other_arm and a.live_hz <= 0:
+        p.error('--other-arm (collision guard) needs the smoothed relay: --live-hz > 0')
     if a.target_joints is not None and len(a.target_joints) != 7:
         p.error('--target-joints needs 7 values')
     return a

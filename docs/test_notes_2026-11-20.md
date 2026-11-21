@@ -17,7 +17,7 @@ Session 20:32:58 - 21:25:55: 7 bring-ups, ~12 teleop starts, 5 HOME, 6 robot ref
 | # | Time | What happened | Assessment |
 |---|---|---|---|
 | O1 | 20:40:35 | right `cartesian_reflex` 21 s into TELEOP | see O7 |
-| O2 | 20:43:10 | left AND right `cartesian_reflex` at the same moment, 34 s into TELEOP | see O7 |
+| O2 | 20:43:10 | left AND right `cartesian_reflex` at the same moment, 34 s into TELEOP | operator (2026-11-21): Rubik's cube held in one hand, other hand twisting a stuck layer -> arms pushed against each other. Real contact |
 | O3 | 20:53:30 | left `self_collision_avoidance_violation` while RAMPING to the GELLO pose (max diff 0.79 rad); after bringup left stayed in REFLEX (self-collision) until the operator switched Desk mode Programming -> Execution | ramp to an arbitrary GELLO pose can hit self-collision limits; Franka does NOT check left-right arm collisions |
 | O4 | 21:02:06 | left `cartesian_reflex`; right `communication_constraints_violation` 1.26 s later | right was a CONSEQUENCE (launch shut down its controller while active); the GUI lists both as equal causes |
 | O5 | 21:03:43 | right `cartesian_reflex` 26 s into TELEOP | see O7 |
@@ -34,16 +34,23 @@ Session 20:32:58 - 21:25:55: 7 bring-ups, ~12 teleop starts, 5 HOME, 6 robot ref
 | O16 | all | recorder: camera "LOW" lines while cameras are off | noise (own tool) |
 
 ## My suggestions (priority order)
-| # | Suggestion | Fixes | Effort |
-|---|---|---|---|
-| S1 | Gate LIVE: smooth the GELLO stream - relay at 200 Hz, interpolate between GELLO samples (~40 ms delay) and cap joint speed; sim test, then hardware | O7 (reflexes) | medium |
-| S2 | Recorder logs per-arm external force (robot_state_10hz O_F_ext) and joint speeds during TELEOP, to verify S1 | O7 | small |
-| S3 | STOP while in ERROR: no state change, reply "robots already stopped by the Franka" | O8, O9 | small |
-| S4 | After an arm crash kill the gates at once (no controller manager left to ask); SHUTDOWN waits until gates are gone | O9 | small |
-| S5 | HOME: a gate that ends DONE must not stop the other arm | O10 | small |
-| S6 | Error message names the FIRST failure as the cause, later ones "(stopped as a consequence)" | O4 | small |
-| S7 | HOLD re-sync: if the GELLO is still again but > 0.08 rad from the robot for 2 s, ramp again to the new GELLO pose | O11 | medium |
-| S8 | Snapshot near a joint limit: keep waiting with "move GELLO <arm> j4 away from its limit" instead of aborting START | O12, O13 | small |
-| S9 | GUI: after bringup with a robot in REFLEX, banner hint "press ERROR RECOVERY" | O3 | small |
-| S10 | Recorder: no camera LOW while cameras are off | O16 | small |
-| S11 | Consider a max start distance again (or a slower ramp for big moves) to reduce ramp self-collisions; Franka does not check arm-arm collisions | O3 | decision |
+| # | Suggestion | Fixes | Effort | Status 2026-11-21 |
+|---|---|---|---|---|
+| S1 | Gate LIVE: smooth the GELLO stream - relay at 200 Hz, interpolate between GELLO samples (~40 ms delay) and cap joint speed; sim test, then hardware | O7 (reflexes) | medium | done in sim (200 Hz, 2 rad/s cap; S15) - hardware test open |
+| S2 | Recorder logs per-arm external force (robot_state_10hz O_F_ext) and joint speeds during TELEOP, to verify S1 | O7 | small | done (motion_<arm>.csv, PEAK, LAST 3 s) - hardware test open |
+| S3 | STOP while in ERROR: no state change, reply "robots already stopped by the Franka" | O8, O9 | small | done, sim T6b |
+| S4 | After an arm crash kill the gates at once (no controller manager left to ask); SHUTDOWN waits until gates are gone | O9 | small | done, sim T6b/T6c |
+| S5 | HOME: a gate that ends DONE must not stop the other arm | O10 | small | done, sim T8 |
+| S6 | Error message names the FIRST failure as the cause, later ones "(stopped as a consequence)" | O4 | small | done (checked on all old logs) |
+| S7 | HOLD re-sync: if the GELLO is still again but > 0.08 rad from the robot for 2 s, ramp again to the new GELLO pose | O11 | medium | done in sim (RESYNC, S16) - hardware test open |
+| S8 | Snapshot near a joint limit: keep waiting with "move GELLO <arm> j4 away from its limit" instead of aborting START | O12, O13 | small | done in sim (S9/S9b); START timeout now 60 s (O13) |
+| S9 | GUI: after bringup with a robot in REFLEX, banner hint "press ERROR RECOVERY" | O3 | small | done: ERROR text says "press ERROR RECOVERY"; RECOVER after a crash restarts the arm stack (T6b) |
+| S10 | Recorder: no camera LOW while cameras are off | O16 | small | done |
+| S11 | Consider a max start distance again (or a slower ramp for big moves) to reduce ramp self-collisions; Franka does not check arm-arm collisions | O3 | decision | decided 2026-11-21: keep as is |
+
+## Operator answers (2026-11-21)
+- One double reflex = Rubik's cube held in one hand while the other hand twisted a stuck layer (O2, 20:43).
+- One single reflex = gripper touched the table. Which of 20:40 / 21:02 / 21:03 is unknown.
+- The other single reflexes are unexplained. S1 (smoothing) targets them; S2 data will tell next time.
+- Decision (2026-11-21): keep the robots' own collision limits for now. Revisit only if the S2 force data shows reflexes without contact.
+- Decision (2026-11-21): S11 kept as is. No max start distance, ramp speed unchanged.

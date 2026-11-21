@@ -26,7 +26,13 @@ and a PyQt5 GUI on two monitors. It runs as one ROS 2 Humble system on one Ubunt
 - Commands: **START** (gated teleop, both arms), **STOP** (deactivate controllers, robots hold
   pose; never refused), **HOME** (both arms to the saved home pose; only when stopped),
   **BRINGUP / SHUTDOWN**, **RECOVER**.
-- Pedals: 1 = START, 2 = STOP, 3 = HOME.
+- Pedals (since 2026-11-21):
+  1. **START**: hold 3 s (releasing earlier cancels). While held, the gates are pre-warmed so LIVE follows quickly.
+  2. **STOP + HOME**: acts at once. A stopped teleop is followed by HOME after 1 s; pressed while HOMING it only aborts.
+  3. **RESET** (pedal 3 sends F12 as a 0.02 s pulse, so it needs a **double tap within 5 s**; after reprogramming it in ElfKey to
+     a held letter key such as C it is a normal 3 s hold): stops, clears errors (Franka Desk prepare, error recovery / arm restart, bring up, as needed),
+     moves both arms HOME and makes the demo ready again. Refused while an emergency stop is still pressed.
+  Services: `/demo/start`, `/demo/stop_home`, `/demo/reset` (plus `/demo/stop`, `/demo/home` for the GUI buttons).
 
 Details: [docs/supervisor_design.md](docs/supervisor_design.md).
 
@@ -45,6 +51,7 @@ Details: [docs/supervisor_design.md](docs/supervisor_design.md).
 | `scripts/gello_align.py`, `scripts/record_gello_holder.py` | Calibration helpers (GELLO vs. robot diff, holder pose recording). |
 | `scripts/test_recorder.py` | Read-only event recorder for test sessions. |
 | `launch/` | `arms_gated`, `gello_check`, `cameras` launch files. |
+| `scripts/depth_view.py` | Depth camera -> colourised JPEG for the GUI (near red, far blue); one per camera, started by `cameras.launch.py`, lazy. |
 | `config/` | GELLO publisher config (isolated namespaces), holder poses, fake-hardware robot config. |
 | `env/host_env.sh` | Sources all workspaces in the right order. |
 | `test/` | Simulation tests (fake hardware, separate ROS domain). |
@@ -101,8 +108,9 @@ The repo is expected at `~/robot_demo`.
 The demo starts **OFFLINE**. In the GUI: **PREPARE ALL** (unlock brakes, Execution mode, FCI on) →
 **BRING UP** → **START** / **STOP** / **HOME**. To finish: **PARK**, then close the GUI.
 
-After a robot reflex or an E-stop the arm stack is gone: release the E-stop, then **SHUTDOWN** and
-**BRING UP**.
+After a robot reflex or an E-stop: release the E-stop, then press **ERROR RECOVERY**. If the arm
+stack crashed, this restarts only the arm stack (controllers inactive, nothing moves). Grippers, GELLO and
+cameras keep running. Otherwise it runs the Franka error recovery.
 
 ## Start gate
 
@@ -115,14 +123,46 @@ data arrives later, the robot jumps to the GELLO pose at full stiffness. `gello_
    takes a snapshot of the pose.
 3. The gate relays the frozen snapshot, then activates a **fresh** controller instance, so the
    robot ramps smoothly to the snapshot.
-4. HOLD until the live GELLO matches the snapshot (< 0.08 rad) → LIVE teleop.
-5. On STOP, a failure or a signal, the gate deactivates the controller and the robot holds its pose.
+4. HOLD until the live GELLO is within 0.08 rad of the snapshot → LIVE. If the operator already moved on while the robot
+   was ramping (up to 0.6 rad away), it goes LIVE at once and **catches up** with the GELLO at 0.5 rad/s (`LIVE: catching up
+   with the GELLO`). Further away (or held still elsewhere for 2 s) the robot ramps again to the new pose (RESYNC).
+5. In LIVE the 25 Hz GELLO stream is smoothed: interpolated to 200 Hz, with every joint capped at 2 rad/s.
+   This avoids torque steps in the impedance controller.
+6. On STOP, a failure or a signal, the gate deactivates the controller and the robot holds its pose.
+
+## Duo collision guard (HOME only)
+**Since 2026-11-21 the guard runs only for HOME**: in teleop it kept the arms from coming close enough for two-handed
+work, so START / LIVE are no longer limited (`demo_supervisor.py --guard-teleop` brings the LIVE limiter back).
+HOME is **planned** collision-free (`scripts/duo_geometry.py: plan_home`): both arms at once if their straight
+joint-space ramps do not collide, else one arm after the other, else via the safe ready pose; the status shows
+`step 1/2 ...`. If no plan exists, HOME is refused with the reason.
+
+Both arms sit on the Franka FR3 Duo mount, so each gate knows where the other arm is (kinematics and mount poses from
+`franka_description`, collision capsules fitted to the FR3 collision meshes: `scripts/duo_geometry.py`,
+`config/duo_geometry.yaml`, margins in `config/duo_guard.yaml`: links 4 cm, gripper-to-gripper 1 cm so two-handed tasks
+stay possible).
+- **HOME phases that move both arms**: both gates wait at a BARRIER until both goals are known, then check the
+  straight joint-space ramps of both arms against each other (the planner has already chosen a safe order). A path that would bring the arms closer than the margin is
+  REFUSED with the links named. A pose that is already inside the margin (the home pose) stays allowed as long as the
+  motion does not make it worse.
+- **In LIVE** every command step that would reduce the clearance below the margin is shortened or held (worst case over the
+  commanded and the actual poses of both arms): the status reads `LIVE: limited by the collision guard (...)`. Moving
+  away is never limited.
+- Robot namespaces map to mount slots in `config/duo_guard.yaml` (`slots`): our `left` (IP .51) sits in the mount's
+  **right** slot (verified with the saved home poses).
+- `scripts/make_mirrored_home.py` makes the two home poses exact mirror images; `demo_supervisor.py --no-guard` switches
+  the guard off (diagnostics only).
 
 ## Tests (simulation, no robot needed)
 
 ```bash
 test/sim_gate_test.sh all          # start gate against fake hardware
-test/sim_supervisor_test.sh        # supervisor state machine
+test/sim_supervisor_test.sh        # supervisor state machine (incl. pedal hold / standby gates)
+test/sim_gui_test.sh               # GUI + supervisor end to end (offscreen)
+python3 test/geometry_test.py      # Duo kinematics, capsule distances, path check (numpy only)
+python3 test/pedal_logic_test.py   # pedal long-press logic (simulated time)
+python3 test/depth_view_test.py    # depth -> colour JPEG converter
+python3 test/gui_camera_test.py    # GUI: depth topics, D405 180-degree flip, window stays screen sized
 ```
 
 ## Working on the GUI without robots
@@ -133,8 +173,8 @@ See [docs/GUI_DEVELOPMENT.md](docs/GUI_DEVELOPMENT.md). Short version:
 ## Brand assets
 
 The GUI uses the Franka Robotics logo. The logo is a trademark and is **not** in this repository.
-Put `FrankaRobotics_CompanyLogo_Digital_RGB.svg` and `FrankaRobotics_CompanyLogo_negative_Digital_RGB.svg`
-into `assets/brand/`. Without them the logo area stays empty. The Montserrat fonts are included
+Put the PNGs listed in [docs/HANDOFF_GUI.md](docs/HANDOFF_GUI.md) (`logo_black.png`, `logo_white.png`, `fr3_duo.png`, the two
+`FrankaRobotics_Trademark_*` icons) into `assets/brand/`. Without them the logo and picture areas stay empty. The Montserrat fonts are included
 under the SIL Open Font License (`assets/brand/fonts/OFL.txt`).
 
 ## Status
