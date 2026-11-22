@@ -1,0 +1,141 @@
+# DIGITAL TWIN settings (hand-edited). Read by launch/digital_twin.launch.py, scripts/twin_state.py,
+# scripts/depth_cloud.py and scripts/twin_calibrate.py. The twin is READ-ONLY: it never commands a robot.
+#
+# Geometry of the arms is NOT here: it comes from config/duo_geometry.yaml + the slot map in config/duo_guard.yaml
+# (same source as the HOME collision planner).
+
+rates:
+  joint_states_hz: 100.0      # /<arm>/franka/joint_states (1 kHz) -> /twin/joint_states, C++ topic_tools throttle
+  gripper_hz: 30.0            # /<arm>/gripper/joint_states (500 Hz) -> twin
+  overlay_hz: 20.0            # load / contact / clearance markers + /twin/status
+  zed_cloud_hz: 10.0          # relay of the ZED point cloud while the layer is on
+  d405_cloud_hz: 6.0          # depth_cloud.py per wrist camera while the layer is on
+
+stale:
+  joint_states_s: 0.25        # no joint state for this long -> arm shown as STALE (warning in the twin)
+  robot_state_s: 1.0          # load / force data older than this is not drawn
+
+overlays:
+  load_full_nm: 12.0          # |tau_ext| that is drawn fully red (joint load spheres)
+  load_min_nm: 1.5            # below this a joint is not highlighted
+  force_min_n: 6.0            # external force arrow only above this (rest noise is 2-5 N on our FR3s)
+  force_scale_m_per_n: 0.012  # arrow length per newton
+  clearance_warn_m: 0.10      # clearance line drawn when the closest capsules are nearer than this
+
+gripper:
+  # Robotiq 2F-85 on the FR3 flange (link8). Visual estimate - adjust if the coupling differs.
+  xyz: [0.0, 0.0, 0.011]
+  rpy: [0.0, 0.0, -0.785398]
+
+# Camera extrinsics (where each camera sits in the twin). calibrated: false -> the twin shows the cloud but marks it
+# "position not calibrated". Adjust live with:  python3 scripts/twin_calibrate.py --camera zed  (twin_state reloads
+# this file when it changes). Frames: parent = a twin frame, child = the camera driver's own root frame.
+cameras:
+  zed:
+    parent: world                     # head camera on the Duo mount (fixed)
+    child: zed_camera_link            # ZED wrapper root frame (its odom TF is switched off in launch/cameras.launch.py)
+    xyz: [0.1350, -0.0050, 0.6023]    # HEAD camera, CALIBRATED 2026-11-22 (twin_autocalib --method plane, overlay checked)
+    rpy: [-0.0108, 0.5416, -0.0117]   # looking forward, 31 deg down; 2 captures agree within 5 mm / 0.5 deg
+    calibrated: true
+    max_range_m: 2.5
+  d405_1:                             # ASSUMPTION (as in the GUI): d405_1 = LEFT wrist
+    parent: left_fr3_link8
+    child: d405_1_link
+    xyz: [0.0551, -0.0013, 0.1482]   # ESTIMATE 2026-11-22 (twin_handeye_ref --method plane): height/tilt good, ~cm in-plane uncertainty
+    rpy: [0.0052, -1.2440, 3.0990]   # body frame; camera looks ~20 deg off the approach axis
+    optical_frame: d405_1_color_optical_frame   # twin publishes link -> optical (driver does not)
+    calibrated: true
+    max_range_m: 0.8
+  d405_2:
+    parent: right_fr3_link8
+    child: d405_2_link
+    xyz: [0.0529, -0.0154, 0.1536]   # ESTIMATE 2026-11-22 (as d405_1)
+    rpy: [-0.0378, -1.2163, 3.1408]   # body frame; camera looks ~20 deg off the approach axis
+    optical_frame: d405_2_color_optical_frame   # twin publishes link -> optical (driver does not)
+    calibrated: true
+    max_range_m: 0.8
+
+# Optional 3D mapping (layer "MAP"): uses the ZED SDK's own spatial mapping through the wrapper's
+# /zed/zed_node/enable_mapping service and its fused cloud. For a FIXED camera the live cloud is the better view;
+# mapping only accumulates the static scene. RTAB-Map is not installed and not needed.
+mapping:
+  fused_cloud_topic: /zed/zed_node/mapping/fused_cloud
+  pose_topic: /zed/zed_node/pose
+
+# SOLID 3D RECONSTRUCTION (scripts/twin_recon.py, docs/DIGITAL_TWIN.md "Reconstruction"). TSDF volume over the bounds
+# below (twin/world frame, metres) fused from the cameras with KNOWN poses (twin TF + FR3 FK; no SLAM), meshed with
+# surface nets. Both robots are filtered out with the duo_geometry capsules. Change voxel_m / bounds, then
+# `ros2 service call /twin/recon/reset std_srvs/srv/Trigger` (re-reads this section). Memory ~11 bytes per voxel:
+# 1 cm over these bounds = 5.4 M voxels = 60 MB; 6 mm = 25 M voxels = 280 MB (and ~5x slower meshing).
+reconstruction:
+  voxel_m: 0.006             # 6 mm (was 1 cm): object detail from the wrist D405s; ~110 MB over these bounds
+  bounds_min: [-0.3, -0.9, -0.15]
+  bounds_max: [1.4, 0.9, 0.55]
+  trunc_vox: 4.0             # truncation band = 4 voxels
+  max_weight: 30.0           # frames until the map "forgets": a moved object vanishes / a placed one appears in ~10 s
+  min_weight: 3.0            # voxels seen fewer times are not meshed
+  smooth_iters: 4            # Taubin smoothing (volume preserving)
+  min_component_tris: 400    # drop floating specks smaller than this (6 mm voxels: 400 tris ~ 7 cm2)
+  mesh_period_s: 1.0         # static mesh re-extraction (live objects update at the same rate)
+  robot_pad_m: 0.025         # depth pixels this close to a robot capsule never become map surface
+  chunk_tris: 20000          # triangles per RViz marker
+  max_chunks: 16
+  export_npz: isaac/cache/mesh_static.npz   # mesh with camera colours for the photoreal twin (Isaac), every mesh update
+  map_file: scans/recon_map.npz   # /twin/recon/save writes it (+ .ply mesh); loaded at start if autoload
+  autoload: true
+  live: {min_weight: 8.0, free_tsdf: 0.3, nb_tsdf: 0.0, hold_s: 1.5, stride: 2}   # hold >= worker cycle (mesh + frames)
+  shading: {light_dir: [0.4, 0.3, 1.0], ambient: 0.42, diffuse: 0.62, sky: 0.08}   # baked into the mesh colours
+  cameras:
+    zed:                     # head camera, fixed -> projection cached, one gather per frame
+      depth: /twin/recon_in/zed/depth                    # C++ throttle of depth_source (launch file)
+      depth_source: /zed/zed_node/depth/depth_registered
+      hz: 3.0
+      info: /zed/zed_node/depth/camera_info
+      color: /zed/zed_node/rgb/color/rect/image/compressed
+      stride: 3              # 1920x1080 -> 640x360
+      near: 0.3
+      far: 2.2
+      moving: false
+      require_calibrated: false   # extrinsic still a guess: the mesh is self-consistent, only placed approximately
+    d405_1:                  # LEFT wrist (verified 2026-11-21)
+      depth: /twin/recon_in/d405_1/depth
+      depth_source: /camera/d405_1/aligned_depth_to_color/image_raw
+      hz: 5.0
+      info: /camera/d405_1/aligned_depth_to_color/camera_info
+      color: /camera/d405_1/color/image_raw/compressed
+      stride: 2
+      near: 0.12             # own gripper fingers are closer
+      far: 0.8
+      moving: true           # pose from TF at the depth stamp (twin FK)
+      arm: left
+      max_joint_speed: 0.4   # rad/s: faster -> frame skipped (blur, stamp skew)
+      require_calibrated: true    # needs cameras.d405_1.calibrated: true (written by the 3D SCAN)
+      weight: 3.0                 # close range, ~1 mm depth noise: counts 3x a ZED frame
+    d405_2:
+      depth: /twin/recon_in/d405_2/depth
+      depth_source: /camera/d405_2/aligned_depth_to_color/image_raw
+      hz: 5.0
+      info: /camera/d405_2/aligned_depth_to_color/camera_info
+      color: /camera/d405_2/color/image_raw/compressed
+      stride: 2
+      near: 0.12
+      far: 0.8
+      moving: true
+      arm: right
+      max_joint_speed: 0.4
+      require_calibrated: true
+      weight: 3.0
+
+# Layers shown at start (the twin display's LAYERS buttons change them at runtime)
+layers:
+  robots: true
+  gello: true          # translucent GELLO ghost while teleop runs
+  load: true
+  force: true
+  clearance: true
+  mesh: true           # solid coloured reconstruction of the workspace (scripts/twin_recon.py)
+  live_objects: true   # moving things the map knows are not static (hands, objects being handled)
+  zed_cloud: false     # raw ZED points (optional overlay; the mesh replaces it)
+  wrist_clouds: false
+  map: false
+  scan: false          # raw points of the saved 3D scan (optional overlay)

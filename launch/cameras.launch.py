@@ -26,6 +26,7 @@ from launch.substitutions import LaunchConfiguration
 D405 = {'d405_1': '_262622274776', 'd405_2': '_262422272263'}
 PROFILE = '848x480x30'
 DEPTH_VIEW = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'depth_view.py')
+ZED_OVERRIDE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config', 'zed_twin_override.yaml')
 # colour range of the depth pictures [m] (red = nearest, blue = farthest): D405 works at 7 cm - 1 m, ZED Mini 0.3 - 3 m
 D405_RANGE, ZED_RANGE = (0.10, 1.00), (0.30, 3.00)
 
@@ -48,9 +49,13 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_d405_2', default_value='true'),
         DeclareLaunchArgument('d405_depth', default_value='true',
                               description='D405 depth + aligned depth'),
+        # Digital twin (2026-11-21): the ZED is a FIXED camera - its own odom/map TF is off so the twin can place
+        # zed_camera_link at its calibrated pose (config/digital_twin.yaml); point cloud at half resolution
+        # (config/zed_twin_override.yaml). Images used by the GUI are unchanged.
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(zed_launch),
-            launch_arguments={'camera_model': 'zedm'}.items(),
+            launch_arguments={'camera_model': 'zedm', 'publish_tf': 'false', 'publish_map_tf': 'false',
+                              'ros_params_override_path': ZED_OVERRIDE}.items(),
             condition=IfCondition(LaunchConfiguration('enable_zed'))),
     ])
     for name, serial in D405.items():

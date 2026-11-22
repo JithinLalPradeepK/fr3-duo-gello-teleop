@@ -1,0 +1,8 @@
+# ZED wrapper parameter override for the DIGITAL TWIN (passed by launch/cameras.launch.py as ros_params_override_path).
+# Only the point cloud is affected - the RGB / depth images used by the GUI (monitor 1) keep the wrapper defaults.
+# The cloud is only computed while somebody subscribes (scripts/twin_cloud.py does, while the "Head cloud" layer is on).
+/**:
+  ros__parameters:
+    depth:
+      point_cloud_res: 'COMPACT'     # measured 2026-11-21: REDUCED gives only 224x128 points on the ZED Mini (too sparse)
+      point_cloud_freq: 10.0

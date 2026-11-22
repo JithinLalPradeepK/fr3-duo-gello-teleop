@@ -19,6 +19,8 @@ pressing it while HOMING only aborts), 3 = RESET (3 s hold): stop, clear errors 
 bring up as needed), HOME, ready again. Services /demo/stop_home and /demo/reset.
 Collision guard (2026-11-21): active ONLY for HOME (the arms did not come near each other in teleop). HOME is planned
 collision-free (scripts/duo_geometry.plan_home): both arms at once, one arm after the other, or via the ready pose;
+SCAN (/demo/scan, 2026-11-21, digital twin): from HOME through the checked views of scripts/scan_plan.py and back, run
+like HOME phases (state HOMING, message "SCAN view i/n"); STOP / pedal 2 / RESET abort it like HOME;
 a phase with one arm starts only that arm's gate. --guard-teleop switches the old LIVE limiter back on.
 Pedal long press (decision 2026-11-21): demo_pedal.py fires START / HOME only after a 3 s hold and publishes the hold
 progress on /demo/pedal/hold. While START or HOME is being held the supervisor PRE-WARMS both gates (--standby: start-up,
@@ -64,8 +66,12 @@ from std_srvs.srv import Trigger
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from duo_geometry import DuoGeometry, plan_home  # noqa: E402
+import scan_plan  # noqa: E402
 
 DEMO = os.path.expanduser('~/robot_demo')
+# Cameras come from THIS copy: its cameras.launch.py carries the digital-twin camera settings (ZED publish_tf:=false, so
+# the twin can place the head camera). Robot-side launches + the gate stay on the tested ~/robot_demo copy.
+CAMERAS_LAUNCH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'launch', 'cameras.launch.py')
 SIGINT_DEFAULT = os.path.join(DEMO, 'scripts', 'sigint_default')
 GATE = os.path.join(DEMO, 'scripts', 'gello_gate.py')
 ARMS = ('left', 'right')
@@ -199,6 +205,8 @@ class Supervisor(Node):
         self.robot_q_idx = {arm: None for arm in ARMS}
         self.home_phases = []                  # phases still to run after the current HOME phase
         self.home_phase_no, self.home_phase_total = 0, 0
+        self.scan_names = None                 # SCAN (digital-twin 3D scan): view names of the running scan plan
+        self.pending_scan = None
         self.pending_plan = None               # plan made by request('home'), consumed by handle_cmd
         self.stop_home_pending = False         # pedal 2: a stopped teleop is followed by HOME
         self.home_at = 0.0
@@ -227,7 +235,7 @@ class Supervisor(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              reliability=ReliabilityPolicy.RELIABLE)
         self.pub_status = self.create_publisher(String, '/demo/status', latched)
-        for cmd in ('start', 'stop', 'stop_home', 'reset', 'home', 'recover', 'bringup', 'shutdown'):
+        for cmd in ('start', 'stop', 'stop_home', 'reset', 'home', 'recover', 'bringup', 'shutdown', 'scan'):
             self.create_service(Trigger, f'/demo/{cmd}',
                                 lambda req, res, c=cmd: self.on_service(c, res), callback_group=cb)
         self.pub_grip = {}
@@ -433,6 +441,16 @@ class Supervisor(Node):
                 if plan is None:
                     return False, f'refused: {why}'
                 self.pending_plan = (plan, time.monotonic())
+            elif cmd == 'scan':
+                if s != 'IDLE':
+                    return False, f'refused: SCAN needs IDLE (now {s})'
+                bad = self.robot_not_ready()
+                if bad:
+                    return False, f'refused: {bad}'
+                plan, why = self.make_scan_plan()
+                if plan is None:
+                    return False, f'refused: {why}'
+                self.pending_scan = (plan, time.monotonic())
             elif cmd == 'recover':
                 if s not in ('ERROR', 'IDLE'):
                     return False, f'refused: RECOVER needs ERROR or IDLE (now {s})'
@@ -473,6 +491,40 @@ class Supervisor(Node):
             return None, ('no collision-free way to the home pose from the current arm poses - '
                           'move the arms apart with the GELLOs (START), then try again')
         return plan, ''
+
+    def make_scan_plan(self):
+        """(plan, why): SCAN = the views of scripts/scan_plan.py (above home, wrists apart, every move checked).
+        Only from the home pose: the plan is checked from there."""
+        now = time.monotonic()
+        if not (self.home['left'] and self.home['right']):
+            return None, 'no home poses'
+        for arm in ARMS:
+            r = self.robot_q[arm]
+            if r is None or now - r[0] > 1.5:
+                return None, f'no joint states from the {arm} arm'
+            if max(abs(a - b) for a, b in zip(r[1], self.home[arm])) > 0.05:
+                return None, f'{arm} arm is not at home - press HOME first'
+        home = {'left': list(self.home['left']), 'right': list(scan_plan.MIRROR * scan_plan.np.asarray(self.home['left']))}
+        if max(abs(a - b) for a, b in zip(home['right'], self.home['right'])) > 0.03:
+            return None, 'the saved home poses are not mirror images (scan views are planned mirrored)'
+        plan, skipped = scan_plan.make_plan(self.geo or DuoGeometry(), home)
+        if plan is None or len(plan) < 3:
+            return None, 'no safe scan views from the home pose: ' + '; '.join(f'{n}: {w}' for n, w in skipped)
+        plan[-1] = ('home', list(self.home['left']), list(self.home['right']))       # end exactly on the saved homes
+        return plan, ''
+
+    def start_scan(self):
+        pp, self.pending_scan = self.pending_scan, None
+        plan = pp[0] if pp and time.monotonic() - pp[1] < 5.0 else None
+        if plan is None:
+            plan, why = self.make_scan_plan()
+            if plan is None:
+                return self.set_state('IDLE', f'SCAN refused: {why}')
+        self.event(f'SCAN plan: {len(plan)} moves: ' + ', '.join(n for n, _l, _r in plan))
+        self.scan_names = [n for n, _l, _r in plan]
+        self.home_phase_total, self.home_phase_no = len(plan), 0
+        self.home_phases = [(list(l), list(r)) for _n, l, r in plan]
+        self.next_home_phase()
 
     def robot_not_ready(self):
         if self.a.sim:
@@ -570,7 +622,7 @@ class Supervisor(Node):
         if self.a.gello:
             self.launch('gello', [os.path.join(DEMO, 'launch', 'gello_check.launch.py'), 'arms:=left,right'])
         if self.a.cameras:
-            self.launch('cameras', [os.path.join(DEMO, 'launch', 'cameras.launch.py')])
+            self.launch('cameras', [CAMERAS_LAUNCH])
         self.t_bringup = time.monotonic()
         self.cameras_reported = False
         self.event('bringup started (grippers do their activation open/close)' if self.a.grippers
@@ -719,6 +771,8 @@ class Supervisor(Node):
                 # '=' form: a pose starting with a negative value must not be parsed as an option
                 q = targets[arm] if targets else self.home[arm]
                 cmd += ['--target-joints=' + ','.join(f'{x:.5f}' for x in q), '--move-timeout', '60']
+                if self.scan_names:
+                    cmd += ['--target-hold', '2.0']           # SCAN: the wrist cameras record while the arm is still
             self.gates[arm] = Proc(f'gate_{mode}_{arm}_{time.strftime("%H%M%S")}', cmd, self.logdir,
                                    signal.SIGTERM)
 
@@ -792,7 +846,10 @@ class Supervisor(Node):
             if self.state != 'IDLE':
                 return self.event(f'{cmd} dropped: state changed to {self.state}')
         if cmd == 'home':
+            self.scan_names = None
             return self.start_home()
+        if cmd == 'scan':
+            return self.start_scan()
         mode = 'teleop'
         if self.prewarm and (self.prewarm['mode'] != mode or not all(p.alive() for p in self.gates.values())):
             self.cancel_prewarm('wrong mode or a gate died')
@@ -829,6 +886,9 @@ class Supervisor(Node):
         who = 'both arms' if all(x is not None for x in phase) else ('the left arm' if phase[0] is not None
                                                                      else 'the right arm')
         step = f'step {self.home_phase_no}/{self.home_phase_total}: ' if self.home_phase_total > 1 else ''
+        if self.scan_names:
+            return self.set_state('HOMING', f'SCAN view {self.home_phase_no}/{self.home_phase_total}: '
+                                            f'{self.scan_names[self.home_phase_no - 1]}')
         self.set_state('HOMING', f'{step}{who} ramping to the {"home" if not self.home_phases else "next"} pose')
 
     # ---- pedal 3: reset = stop, clear errors, HOME, ready again
@@ -1032,7 +1092,10 @@ class Supervisor(Node):
                 return self.set_state('TELEOP', 'both arms LIVE')
             if s in ('TELEOP_STARTING', 'HOMING'):
                 txt = '; '.join(f'{a}: {self.gate_state[a] or "starting"}' for a in ARMS if a in self.gates)
-                if s == 'HOMING' and self.home_phase_total > 1:
+                if s == 'HOMING' and self.scan_names:
+                    txt = (f'SCAN view {self.home_phase_no}/{self.home_phase_total}: '
+                           f'{self.scan_names[self.home_phase_no - 1]}: {txt}')
+                elif s == 'HOMING' and self.home_phase_total > 1:
                     txt = f'step {self.home_phase_no}/{self.home_phase_total}: {txt}'
                 if txt != self.message:
                     self.set_state(s, txt)
@@ -1048,8 +1111,11 @@ class Supervisor(Node):
         self.gate_mode = None
         self.prewarm = None
         stop_home, self.stop_home_pending = self.stop_home_pending, False
+        scanning, self.scan_names = self.scan_names, None
         if not (mode == 'home' and self.home_phases and all(c == 0 for c in codes.values())):
             self.home_phases = []                     # anything but a clean phase end cancels the rest of the plan
+        elif scanning:
+            self.scan_names = scanning                # scan continues with the next view
         if not self.arms_crash_reported and self.arm_crash_cause():
             self.report_arm_crash()                   # gate saw the dead controller manager first
         if any(c == 4 for c in codes.values()) and not self.arms_crash_reported:
@@ -1061,7 +1127,7 @@ class Supervisor(Node):
         if mode == 'home' and all(c == 0 and self.gate_state[a].startswith('DONE') for a, c in codes.items()):
             if self.home_phases:
                 return self.next_home_phase()
-            return self.set_state('IDLE', 'both arms at home')
+            return self.set_state('IDLE', 'scan complete - both arms at home' if scanning else 'both arms at home')
         if stop_home and mode == 'teleop' and all(c == 0 for c in codes.values()):
             self.home_at = time.monotonic() + 1.0     # pedal 2: the robots have stopped, now HOME
         self.set_state('IDLE', f'{mode} ended: {detail}')
@@ -1090,6 +1156,8 @@ class Supervisor(Node):
                     'cameras_launch': 'off' if cam is None else ('running' if cam.alive() else 'stopped'),
                     'pedal': 'connected' if now - self.pedal_t < 3.0 else 'not connected',
                     'reset': (self.reset['plan'][0] if self.reset and self.reset['plan'] else None),
+                    'scan': ({'view': self.scan_names[self.home_phase_no - 1], 'no': self.home_phase_no,
+                              'of': self.home_phase_total} if self.scan_names and self.home_phase_no else None),
                     'arming': ({'teleop': 'start', 'home': 'home'}[self.prewarm['mode']] if self.prewarm else None),
                     'last_event': self.last_event, 'sim': self.a.sim, 'logdir': self.logdir}
 

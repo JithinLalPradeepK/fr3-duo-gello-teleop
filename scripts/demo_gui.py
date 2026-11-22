@@ -9,8 +9,10 @@
 
 TWO DISPLAYS (2026-11-21: the Home page was REMOVED, the cameras are the base page of both displays):
 display 1 (--control-screen, default 0) = camera page, ROBO STATUS closed (cameras fill the screen), plus the Operator page;
-display 2 (--camera-screen, default 1) = camera page with the ROBO STATUS list OPEN on the left. One monitor / --single:
-one window = display 1. The STATUS button opens / closes the list on either display.
+display 2 (--camera-screen, default 1) = DIGITAL TWIN (since 2026-11-21, TwinWindow): the RViz2 3D view of both FR3s from
+launch/digital_twin.launch.py embedded full screen (header, telemetry bar, LAYER switches). --second-display cameras = the
+old camera page with the ROBO STATUS list OPEN on the left. One monitor / --single: one window = display 1.
+The STATUS button opens / closes the list on the camera page.
 Redesign (branch features/GUI-development, see docs/GUI_CHANGES.md):
   LIVE      camera page (the page both displays start on), layout from the design mockup assets/brand/Home@1x(2).png, no
             navbar: header bar (logo, title, CAMERA VIEW / OPERATOR MODE tabs, STATUS / theme / full screen), ROBO STATUS list
@@ -29,6 +31,8 @@ import argparse
 import json
 import math
 import os
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -37,7 +41,7 @@ import rclpy
 from PyQt5.QtCore import (QBuffer, QByteArray, QEasingCurve, QEvent, QIODevice, QObject, QPoint, QPointF, QPropertyAnimation, QRectF,
                           QSize, Qt, QTimer, QVariantAnimation, pyqtProperty, pyqtSignal)
 from PyQt5.QtGui import (QColor, QFont, QImage, QImageReader, QLinearGradient, QPainter, QPainterPath, QPen,
-                         QPixmap)
+                         QPixmap, QWindow)
 from PyQt5.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel,
                              QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QShortcut, QSizePolicy, QStackedWidget,
                              QVBoxLayout, QWidget)
@@ -1350,6 +1354,12 @@ class OperatorPage(QWidget):
         for b in (self.b_start, self.b_stop, self.b_home):
             row.addWidget(b)
         cv.addLayout(row)
+        self.b_scan = self.button('3D SCAN  ·  robots look around for the digital twin (from HOME, ~2 min)', 'scan')
+        cv.addWidget(self.b_scan)
+        b_web = QPushButton('PHOTOREAL TWIN  ·  open the browser view (scripts/start_isaac_twin.sh)')
+        b_web.clicked.connect(lambda: subprocess.Popen(['xdg-open', 'http://127.0.0.1:8211/'],
+                                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        cv.addWidget(b_web)
         self.hint = label('', 'subline', wrap=True)
         self.reply = label('', 'mono', wrap=True)
         cv.addWidget(self.hint)
@@ -1487,6 +1497,7 @@ class OperatorPage(QWidget):
         idle = conn and state == 'IDLE'
         self.b_start.setEnabled(idle)
         self.b_home.setEnabled(idle)
+        self.b_scan.setEnabled(idle)
         self.b_stop.setEnabled(True)                              # STOP is never disabled
         self.b_bringup.setEnabled(conn and state == 'OFFLINE')
         self.b_shutdown.setEnabled(conn and state in ('IDLE', 'ERROR', 'STARTING_UP'))
@@ -1722,6 +1733,610 @@ class MainWindow(ConfirmClose, QWidget):
             self.operator.refresh()
 
 
+# ---------------------------------------------------------------------------------------------- digital twin display
+# Display 2 (since 2026-11-21, --second-display twin = default): a full-screen, interactive 3D digital twin of both FR3s
+# instead of the duplicated camera page. The 3D view is RViz2 (launch/digital_twin.launch.py, started by start_demo.sh);
+# this window embeds the RViz window and shows only its 3D panel, framed by the usual header and a telemetry bar.
+# Read-only: the only thing this display sends is the layer selection (/twin/layers_cmd) to scripts/twin_state.py.
+TWIN_TITLE = 'FR3 Duo Digital Twin'           # rviz2 window title (-t in launch/digital_twin.launch.py)
+TWIN_LAYERS = [('robots', 'Robots'), ('gello', 'GELLO ghost'), ('load', 'Joint load'), ('force', 'Contact force'), ('clearance', 'Clearance'),
+               ('mesh', '3D mesh'), ('live_objects', 'Live objects'), ('scan', 'Scan points'), ('zed_cloud', 'Head cloud'), ('wrist_clouds', 'Wrist clouds'), ('map', '3D map')]
+STATE_SHORT = {'TELEOP_STARTING': 'STARTING', 'STARTING_UP': 'BRINGING UP', 'SHUTTING_DOWN': 'SHUT DOWN'}
+
+
+class TwinLink(QObject):
+    """/twin/status (JSON from twin_state.py) in, layer requests out (/twin/layers_cmd; twin_state owns the state)."""
+    status = pyqtSignal(dict)
+
+    def __init__(self, ros, preview=False):
+        super().__init__()
+        self.preview, self.pub, self.fake = preview, None, None
+        if preview:                                       # --preview: fake twin data, nothing sent
+            self.fake = {'layers': {k: k in ('robots', 'gello', 'load', 'force', 'clearance', 'mesh', 'live_objects')
+                                    for k, _ in TWIN_LAYERS}}
+            t = QTimer(self)
+            t.timeout.connect(self.fake_tick)
+            t.start(500)
+            return
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
+        ros.node.create_subscription(String, '/twin/status', self.on_status, latched)
+        self.pub = ros.node.create_publisher(String, '/twin/layers_cmd', 10)
+
+    def on_status(self, m):
+        try:
+            self.status.emit(json.loads(m.data))
+        except ValueError:
+            pass
+
+    def set_layer(self, key, on):
+        if self.preview:
+            self.fake['layers'][key] = on
+            self.fake_tick()
+        elif self.pub:
+            self.pub.publish(String(data=json.dumps({key: bool(on)})))
+
+    def fake_tick(self):
+        t = time.time()
+        arm = {'state': 'live', 'hz': 100, 'latency_ms': 0.4, 'latency_max_ms': 1.6, 'mode': 'MOVE',
+               'f_ext_n': round(4 + 8 * (0.5 + 0.5 * math.sin(t / 2)), 1), 'tau_max_nm': 3.2, 'tau_joint': 4,
+               'contact': False, 'gripper': 0.3}
+        self.status.emit({'arms': {'left': arm, 'right': dict(arm, f_ext_n=3.1)}, 'layers': self.fake['layers'],
+                          'clearance': {'m': 0.12 + 0.05 * math.sin(t / 3), 'margin_m': 0.04, 'pair': 'gripper / gripper',
+                                        'level': 'ok'},
+                          'clouds': {'zed': {'on': self.fake['layers']['zed_cloud'], 'hz': 9.8, 'points': 61000},
+                                     'mesh': {'on': self.fake['layers']['mesh'], 'hz': 3.0, 'points': 84000}},
+                          'calibrated': {'zed': False, 'd405_1': False, 'd405_2': False}, 't': t})
+
+
+def x11_window(title):
+    """X11 window id of the window titled `title` (RViz adds "*" once its config is modified), or None. Read-only."""
+    try:
+        r = subprocess.run(['xwininfo', '-root', '-tree'], capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r'^\s*(0x[0-9a-fA-F]+) "' + re.escape(title) + r'\*?":', r.stdout, re.M)
+    return int(m.group(1), 16) if m else None
+
+
+def x11_render_margins(wid):
+    """(left, top, right, bottom) of the largest native child window (= RViz's 3D render panel) inside window wid.
+    None if the window is gone or has no render panel yet."""
+    try:
+        top = subprocess.run(['xwininfo', '-id', hex(wid)], capture_output=True, text=True, timeout=2)
+        tree = subprocess.run(['xwininfo', '-tree', '-id', hex(wid)], capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if top.returncode or tree.returncode:
+        return None
+    g = {k: int(v) for k, v in re.findall(r'(Absolute upper-left [XY]|Width|Height):\s+(-?\d+)', top.stdout)}
+    if len(g) < 4:
+        return None
+    ax, ay, w, h = g['Absolute upper-left X'], g['Absolute upper-left Y'], g['Width'], g['Height']
+    best = None
+    for cw, ch, _x, _y, cx, cy in re.findall(r'(\d+)x(\d+)\+(-?\d+)\+(-?\d+)\s+\+(-?\d+)\+(-?\d+)\s*$', tree.stdout, re.M):
+        cw, ch, cx, cy = int(cw), int(ch), int(cx), int(cy)
+        if cw < 50 or ch < 50 or (cw >= w and ch >= h):
+            continue
+        if best is None or cw * ch > best[0] * best[1]:
+            best = (cw, ch, cx - ax, cy - ay)
+    if best is None:
+        return None
+    cw, ch, l, t = best
+    return (l, t, w - cw - l, h - ch - t)
+
+
+def x11_parent(wid):
+    """X11 parent window id of wid, or None."""
+    try:
+        r = subprocess.run(['xwininfo', '-tree', '-id', hex(wid)], capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r'Parent window id: (0x[0-9a-fA-F]+)', r.stdout)
+    return int(m.group(1), 16) if m else None
+
+
+class StagePlaceholder(ImageView):
+    """Loading animation in the colours of the (always dark) 3D stage, in both GUI modes."""
+
+    def paintEvent(self, e):
+        mode, T.MODE = T.MODE, 'dark'
+        try:
+            super().paintEvent(e)
+        finally:
+            T.MODE = mode
+
+
+class RvizHost(QWidget):
+    """Embeds the RViz2 window of the digital twin (X11) and shows ONLY its 3D render panel: the RViz window is put into
+    this native widget and shifted so that its menu bar, tool bar, dock handles and status bar lie outside (X clips them).
+    Mouse orbit / zoom / pan go straight to RViz. Until RViz is there (or after it died - the launch respawns it) a
+    loading animation is shown. Not X11 or --no-embed: RViz stays a normal window and this shows a hint."""
+
+    def __init__(self, title=TWIN_TITLE, embed=True):
+        super().__init__()
+        self.setAttribute(Qt.WA_NativeWindow)            # the embedded window must be clipped by a native parent
+        self.setObjectName('plain')
+        self.title, self.embed_ok = title, embed and QApplication.platformName() == 'xcb'
+        self.wid, self.container, self.margins, self.checks, self.fw = None, None, (0, 0, 0, 0), 0, None
+        self.retries = 0
+        self.placeholder = StagePlaceholder(icon=True)
+        self.placeholder.setParent(self)
+        self.placeholder.set_text('STARTING 3D VIEW ...' if self.embed_ok else
+                                  '3D VIEW RUNS IN ITS OWN WINDOW (no X11 embedding)', loading=self.embed_ok)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll)
+        if self.embed_ok:
+            self.timer.start(1000)
+
+    @property
+    def embedded(self):
+        return self.container is not None
+
+    def poll(self):
+        if self.container is None:
+            wid = x11_window(self.title)
+            m = x11_render_margins(wid) if wid else None
+            if m:
+                self.attach(wid, m)
+            return
+        m = x11_render_margins(self.wid)
+        if m is None:                                    # RViz died (the launch respawns it): wait for the new window
+            self.detach()
+            return
+        if self.checks < 8 and x11_parent(self.wid) != int(self.container.winId()):
+            # the window manager kept the (still managed) RViz top-level: withdraw it again, wait longer, re-embed
+            self.retries += 1
+            wid = self.wid
+            self.detach()
+            self.attach(wid, m, delay=min(400 * (self.retries + 1), 2000))
+            return
+        self.checks += 1
+        if m != self.margins and self.checks < 6:        # re-measure right after embedding (layout settles)
+            self.margins = m
+            self.place()
+
+    def attach(self, wid, margins, delay=400):
+        """Step 1: WITHDRAW the RViz top-level (unmap) so the window manager lets go of it - a window that is still
+        managed gets pulled back into its frame. Step 2 (`delay` ms later): put it into our container. poll() checks
+        afterwards that RViz really sits in the container and retries with a longer delay if not."""
+        win = QWindow.fromWinId(wid)
+        if win is None:
+            return
+        self.timer.stop()
+        win.hide()
+        QTimer.singleShot(delay, lambda: self.attach2(win, wid, margins))
+
+    def attach2(self, win, wid, margins):
+        self.timer.start(1000)
+        self.wid, self.margins, self.checks = wid, margins, 0
+        self.fw = win
+        self.container = QWidget.createWindowContainer(win, self)
+        self.container.setFocusPolicy(Qt.StrongFocus)
+        # make the container NATIVE before it is shown: only then does Qt parent the RViz window to the container's own
+        # X window (inside this native widget, so X clips it); otherwise it goes to the top-level and overlaps the header
+        self.container.winId()
+        self.place()
+        self.container.show()
+        self.placeholder.hide()
+        self.placeholder.set_text('3D VIEW', loading=False)
+
+    def release(self):
+        """GUI quits: hand the RViz window back to the root window (hidden) BEFORE our X windows go away - X destroys
+        the windows of other programs that are still inside ours. A new GUI embeds it again."""
+        if self.container is None:
+            return
+        self.timer.stop()
+        win = self.fw
+        try:
+            win.setParent(None)
+            win.hide()
+        except RuntimeError:
+            pass
+        self.container, self.fw = None, None
+
+    def detach(self):
+        if self.container is not None:
+            self.container.hide()
+            self.container.setParent(None)
+            self.container.deleteLater()
+        self.container, self.wid, self.fw = None, None, None
+        self.placeholder.set_text('RESTARTING 3D VIEW ...', loading=True)
+        self.placeholder.show()
+
+    def place(self):
+        self.placeholder.setGeometry(self.rect())
+        if self.container is not None:
+            left, top, right, bottom = self.margins
+            self.container.setGeometry(-left, -top, self.width() + left + right, self.height() + top + bottom)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.place()
+
+
+class TwinCell(QFrame):
+    """Telemetry cell of the twin bar: status dot, caption, one mono value line."""
+
+    def __init__(self, caption):
+        super().__init__()
+        self.setObjectName('plain')
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(10)
+        self.dot = Dot('off', 12)
+        v = QVBoxLayout()
+        v.setSpacing(1)
+        self.cap = label(caption.upper(), 'caption')
+        self.val = label('-', 'mono')
+        v.addWidget(self.cap)
+        v.addWidget(self.val)
+        h.addWidget(self.dot, 0, Qt.AlignVCenter)
+        h.addLayout(v)
+
+    def set(self, level, text):
+        self.dot.set_level(level)
+        self.val.setText(text)
+
+
+PHOTOREAL_STREAM = 'http://127.0.0.1:8212'          # isaac/twin_isaac.py --stream (scripts/start_isaac_twin.sh)
+PHOTOREAL_VIEWS = [('hero', 'Overview'), ('front', 'Front'), ('top', 'Top'), ('left', 'Left'), ('right', 'Right'),
+                   ('headcam', 'Head camera')]
+
+
+class PhotorealView(QWidget):
+    """The PHOTOREAL twin (Isaac Sim, RTX path tracing) in the application: reads the renderer's MJPEG stream in a
+    background thread and paints it to fill the display (no browser / WebEngine needed). Left drag = orbit, right or
+    shift drag = pan, wheel = zoom - sent to the renderer's /view. Read-only for the robots. Same interface as RvizHost
+    (placeholder, release) so TwinWindow can use either."""
+    frame_ready = pyqtSignal(QImage)
+
+    def __init__(self, url=PHOTOREAL_STREAM):
+        super().__init__()
+        self.url, self.img, self.t_frame = url, None, 0.0
+        self.setObjectName('plain')
+        self.setCursor(Qt.OpenHandCursor)
+        self.placeholder = StagePlaceholder(icon=True)
+        self.placeholder.setParent(self)
+        self.placeholder.set_text('STARTING PHOTOREAL VIEW ...', loading=True)
+        self.frame_ready.connect(self.on_frame)
+        self.stop, self.drag, self.acc = threading.Event(), None, {'daz': 0.0, 'del': 0.0, 'pan': [0.0, 0.0]}
+        threading.Thread(target=self.reader, daemon=True).start()
+        self.t_send = QTimer(self)
+        self.t_send.timeout.connect(self.flush)
+        self.t_send.start(50)
+        self.t_watch = QTimer(self)
+        self.t_watch.timeout.connect(self.watch)
+        self.t_watch.start(1000)
+
+    def reader(self):
+        import urllib.request
+        while not self.stop.is_set():
+            try:
+                with urllib.request.urlopen(self.url + '/stream.mjpg', timeout=5) as r:
+                    buf = b''
+                    while not self.stop.is_set():
+                        chunk = r.read(65536)
+                        if not chunk:
+                            break
+                        buf += chunk
+                        a = buf.find(b'\xff\xd8')
+                        b = buf.find(b'\xff\xd9', a + 2) if a >= 0 else -1
+                        while a >= 0 and b >= 0:
+                            img = QImage.fromData(buf[a:b + 2], 'JPG')
+                            if not img.isNull():
+                                self.frame_ready.emit(img)
+                            buf = buf[b + 2:]
+                            a = buf.find(b'\xff\xd8')
+                            b = buf.find(b'\xff\xd9', a + 2) if a >= 0 else -1
+                        if len(buf) > 8_000_000:
+                            buf = b''
+            except Exception:       # noqa: BLE001 - renderer not up yet / restarting: retry
+                self.stop.wait(2.0)
+
+    def on_frame(self, img):
+        self.img, self.t_frame = img, time.monotonic()
+        if self.placeholder.isVisible():
+            self.placeholder.hide()
+        self.update()
+
+    def watch(self):
+        if time.monotonic() - self.t_frame > 5.0 and not self.placeholder.isVisible():
+            self.placeholder.set_text('PHOTOREAL VIEW RESTARTING ...', loading=True)
+            self.placeholder.show()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(10, 19, 24))
+        if self.img is not None:
+            s = self.img.size().scaled(self.size(), Qt.KeepAspectRatioByExpanding)
+            x, y = (self.width() - s.width()) // 2, (self.height() - s.height()) // 2
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            p.drawImage(QRectF(x, y, s.width(), s.height()), self.img)
+        p.end()
+
+    def resizeEvent(self, e):
+        self.placeholder.setGeometry(self.rect())
+        super().resizeEvent(e)
+
+    def post(self, body):
+        import urllib.request
+
+        def go():
+            try:
+                req = urllib.request.Request(self.url + '/view', data=json.dumps(body).encode(),
+                                             headers={'Content-Type': 'application/json'})
+                urllib.request.urlopen(req, timeout=2).read()
+            except Exception:       # noqa: BLE001
+                pass
+        threading.Thread(target=go, daemon=True).start()
+
+    def preset(self, name):
+        self.post({'preset': name})
+
+    def mousePressEvent(self, e):
+        self.drag = (e.pos(), e.button() == Qt.RightButton or e.modifiers() & Qt.ShiftModifier)
+        self.setCursor(Qt.ClosedHandCursor)
+
+    def mouseMoveEvent(self, e):
+        if not self.drag:
+            return
+        d = e.pos() - self.drag[0]
+        self.drag = (e.pos(), self.drag[1])
+        if self.drag[1]:
+            self.acc['pan'][0] -= d.x() * 0.002
+            self.acc['pan'][1] += d.y() * 0.002
+        else:
+            self.acc['daz'] -= d.x() * 0.3
+            self.acc['del'] += d.y() * 0.3
+
+    def mouseReleaseEvent(self, _e):
+        self.drag = None
+        self.setCursor(Qt.OpenHandCursor)
+
+    def wheelEvent(self, e):
+        self.post({'zoom': 1.1 if e.angleDelta().y() < 0 else 1 / 1.1})
+
+    def flush(self):
+        a = self.acc
+        if a['daz'] or a['del'] or a['pan'][0] or a['pan'][1]:
+            self.post(dict(a))
+            self.acc = {'daz': 0.0, 'del': 0.0, 'pan': [0.0, 0.0]}
+
+    def release(self):
+        self.stop.set()
+
+
+class TwinWindow(ConfirmClose, QWidget):
+    """Display 2: the digital twin. Header like the camera page (logo, title, demo state, OPERATOR MODE, theme, full
+    screen), the RViz 3D view (orbit = left drag, pan = middle drag / shift, zoom = wheel) and a telemetry bar: per-arm
+    data state / rate / latency, inter-arm clearance, contact force, 3D scene, plus the LAYER switches."""
+    MARGIN, GAP = 10, 8
+
+    def __init__(self, model, ros, hub, link, preview=False, embed=True):
+        super().__init__()
+        self.m, self.hub, self.link = model, hub, link
+        self.main_window = self
+        self.ts, self.ts_t = {}, 0.0
+        self.setWindowTitle('Robot demo - DIGITAL TWIN' + (' (PREVIEW)' if preview else ''))
+        root = QVBoxLayout(self)
+        root.setContentsMargins(self.MARGIN, 6, self.MARGIN, 6)
+        root.setSpacing(6)
+        # ---- header (same look as the camera page header)
+        self.header = QFrame()
+        self.header.setObjectName('card')
+        self.header.setFixedHeight(76)
+        hl = QHBoxLayout(self.header)
+        hl.setContentsMargins(20, 0, 16, 0)
+        hl.setSpacing(16)
+        self.logo = QLabel()
+        self.logo.setObjectName('plain')
+        hl.addWidget(self.logo, 0, Qt.AlignVCenter)
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        self.title = QLabel('Digital Twin')
+        self.title.setObjectName('plain')
+        titles.addWidget(self.title)
+        titles.addWidget(label('FR3 DUO  /  LIVE 3D', 'mono'))
+        hl.addLayout(titles)
+        hl.addStretch(1)
+        self.problem = QLabel()
+        self.problem.setObjectName('plain')
+        self.problem.setWordWrap(True)
+        self.problem.setMaximumWidth(620)
+        self.problem.setMaximumHeight(64)
+        hl.addWidget(self.problem, 0, Qt.AlignVCenter)
+        self.pill = StatusPill()
+        hl.addWidget(self.pill, 0, Qt.AlignVCenter)
+
+        def navbtn(text, slot):
+            b = QPushButton(text)
+            b.setObjectName('navbtn')
+            b.setFixedHeight(40)
+            b.clicked.connect(slot)
+            return b
+        self.b_operator = navbtn('OPERATOR MODE', self.open_operator)
+        self.b_theme = navbtn('', lambda: hub.set_theme('dark' if hub.theme == 'light' else 'light'))
+        self.b_full = navbtn('FULL SCREEN', self.toggle_full)
+        for b in (self.b_operator, self.b_theme, self.b_full):
+            hl.addWidget(b, 0, Qt.AlignVCenter)
+        root.addWidget(self.header)
+        # ---- 3D view in a rounded frame
+        self.frame = QFrame()
+        self.frame.setObjectName('card')
+        fl = QVBoxLayout(self.frame)
+        fl.setContentsMargins(0, 0, 0, 0)
+        self.photoreal = os.environ.get('DEMO_TWIN_VIEW', 'photoreal') == 'photoreal' and not preview
+        if self.photoreal:
+            self.view = PhotorealView()
+        else:
+            self.view = RvizHost(embed=embed and not preview)
+        if preview:
+            self.view.placeholder.set_text('3D VIEW (PREVIEW - RViz runs with the real demo)', loading=True)
+        fl.addWidget(self.view)
+        root.addWidget(self.frame, 1)
+        # ---- telemetry + layers bar
+        self.bar = QFrame()
+        self.bar.setObjectName('card')
+        self.bar.setFixedHeight(84)
+        bl = QHBoxLayout(self.bar)
+        bl.setContentsMargins(22, 10, 16, 10)
+        bl.setSpacing(28)
+        self.cells = {'left': TwinCell('Left arm'), 'right': TwinCell('Right arm'),
+                      'clear': TwinCell('Arm clearance'), 'force': TwinCell('Contact force'),
+                      'scene': TwinCell('3D scene')}
+        for c in self.cells.values():
+            bl.addWidget(c)
+        bl.addStretch(1)
+        lay_box = QVBoxLayout()
+        lay_box.setSpacing(4)
+        lay_box.addWidget(label('VIEW' if self.photoreal else 'LAYERS', 'caption'))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.layer_btn = {}
+        for key, text in (PHOTOREAL_VIEWS if self.photoreal else []):
+            b = QPushButton(text)
+            b.setFixedHeight(34)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _on, k=key: self.view.preset(k))
+            row.addWidget(b)
+        for key, text in ([] if self.photoreal else TWIN_LAYERS):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setFixedHeight(34)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda on, k=key: self.link.set_layer(k, on))
+            self.layer_btn[key] = b
+            row.addWidget(b)
+        lay_box.addLayout(row)
+        bl.addLayout(lay_box)
+        root.addWidget(self.bar)
+
+        link.status.connect(self.on_twin)
+        QApplication.instance().aboutToQuit.connect(self.view.release)
+        model.updated.connect(self.update_all)
+        hub.theme_changed.connect(self.apply_theme)
+        self.apply_theme(hub.theme)
+
+    # -- navigation (same behaviour as the camera display: the Operator page opens on the MAIN display)
+    def open_operator(self):
+        w = self.main_window
+        if w is self:
+            return
+        w.show_operator()
+        w.raise_()
+        w.activateWindow()
+
+    def toggle_full(self):
+        self.showMaximized() if self.isFullScreen() else self.showFullScreen()
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == QEvent.WindowStateChange:
+            self.b_full.setText('EXIT FULL SCREEN' if self.isFullScreen() else 'FULL SCREEN')
+
+    # -- look
+    def apply_theme(self, mode):
+        self.setStyleSheet(T.stylesheet(mode))
+        pm, w, h = T.logo_pixmap(mode, 220)
+        self.logo.setPixmap(pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.logo.setFixedSize(w, h)
+        self.b_theme.setText('☾  DARK' if mode == 'light' else '☀  LIGHT')
+        c = T.pal()
+        self.title.setStyleSheet(f"font-size:22px; font-weight:700; color:{c['fg']}; background:transparent;")
+        # the 3D stage is always Franka dark blue (RViz background): frame it in the same colour in both modes
+        self.frame.setStyleSheet("QFrame#card {background:#13222A; border-radius:14px;}")
+        on_bg = T.DARK_BLUE if mode == 'light' else T.BLACK
+        for b in self.layer_btn.values():
+            b.setStyleSheet(f"QPushButton {{background:{c['btn_dis_bg']}; color:{c['muted']}; border:none; border-radius:8px;"
+                            f" padding:0 14px; font-size:12px; font-weight:600;}}"
+                            f"QPushButton:checked {{background:{on_bg}; color:{T.WHITE};}}"
+                            f"QPushButton:hover {{background:{T.GREY}; color:{T.WHITE};}}")
+        self.view.placeholder.update()
+        self.update_all()
+
+    # -- data
+    def on_twin(self, s):
+        self.ts, self.ts_t = s, time.monotonic()
+        self.refresh_twin()
+
+    def refresh_twin(self):
+        s = self.ts if time.monotonic() - self.ts_t < 3.0 else {}
+        if not s:
+            for c in self.cells.values():
+                c.set('off', 'twin not running')
+            return
+        for key, b in self.layer_btn.items():
+            want = bool((s.get('layers') or {}).get(key))
+            if b.isChecked() != want:
+                b.setChecked(want)
+        forces = []
+        for arm in ARMS:
+            a = (s.get('arms') or {}).get(arm, {})
+            st = a.get('state', 'no data')
+            if st == 'live':
+                lat = a.get('latency_ms')
+                self.cells[arm].set('ok', f"LIVE  {a.get('hz', 0)} Hz  {lat:.1f} ms" if lat is not None
+                                    else f"LIVE  {a.get('hz', 0)} Hz")
+            elif st == 'stale':
+                self.cells[arm].set('warn', f"STALE  last data {a.get('age_s', 0):.1f} s ago")
+            else:
+                self.cells[arm].set('bad', 'NO DATA  (showing home pose)')
+            if a.get('mode') in ('REFLEX', 'USER_STOPPED'):
+                self.cells[arm].set('bad', {'REFLEX': 'REFLEX - robot stopped itself',
+                                            'USER_STOPPED': 'E-STOP pressed'}[a['mode']])
+            if a.get('f_ext_n') is not None:
+                forces.append((arm, a['f_ext_n'], a.get('contact')))
+        cl = s.get('clearance')
+        live = all((s.get('arms') or {}).get(a, {}).get('state') == 'live' for a in ARMS)
+        if cl and live:
+            self.cells['clear'].set({'ok': 'ok', 'warn': 'warn', 'bad': 'bad'}[cl['level']],
+                                    f"{max(cl['m'], 0) * 100:.1f} cm  ({cl['pair']})")
+        else:
+            self.cells['clear'].set('off', 'needs both arms live')
+        if forces:
+            worst = max(forces, key=lambda f: f[1])
+            self.cells['force'].set('bad' if any(f[2] for f in forces) else 'warn' if worst[1] > 15 else 'ok',
+                                    '   '.join(f"{a[0].upper()} {f:.0f} N{' CONTACT' if c else ''}" for a, f, c in forces))
+        else:
+            self.cells['force'].set('off', 'no robot state')
+        scan = s.get('scan') or {}
+        if scan and (scan.get('busy') or str(scan.get('text', '')).startswith('recording')) and \
+                time.time() - scan.get('t', 0) < 600:
+            self.cells['scene'].set('warn', '3D SCAN: ' + scan['text'])
+            return
+        on = [(k, v) for k, v in (s.get('clouds') or {}).items() if v.get('on') and k != 'scan']
+        cal = s.get('calibrated') or {}
+        sc = (s.get('clouds') or {}).get('scan') or {}
+        scan_txt = f"SCAN {sc['points'] / 1000:.0f}k pts  " if sc.get('on') and sc.get('points') else ''
+        if not on:
+            self.cells['scene'].set('ok' if scan_txt else 'off', scan_txt + ('' if scan_txt else 'robots only (clouds off)'))
+        else:
+            parts = [(f"MESH {(v.get('points') or 0) / 1000:.0f}k tri " if k == 'mesh' else
+                      f"{ {'zed': 'HEAD', 'd405_1': 'L-WRIST', 'd405_2': 'R-WRIST', 'map': 'MAP'}.get(k, k)} ")
+                     + (f"{v['hz']:.0f} Hz" if v.get('hz') else 'waiting for camera') for k, v in on]
+            uncal = [k for k, _ in on if k in cal and not cal[k]]
+            ok = all((v.get('hz') or 0) > 0 for _, v in on)
+            self.cells['scene'].set('warn' if uncal or not ok else 'ok',
+                                    scan_txt + '  '.join(parts) + ('  (not calibrated)' if uncal else ''))
+
+    def update_all(self):
+        m, state = self.m, self.m.state
+        variant = ('ok' if state in ('IDLE', 'TELEOP') else 'off' if state in ('ERROR', 'OFFLINE')
+                   else 'warn')
+        self.pill.set(variant, STATE_SHORT.get(state, state.replace('_', ' ')))
+        iss = m.issues()
+        if iss and iss[0][0] == 'error':              # visitor-facing display: errors only (warnings: main display)
+            fg, _bg = variant_colors('off')
+            text = iss[0][1]
+            self.problem.setText(text if len(text) <= 150 else text[:147].rstrip() + ' ...')      # max 2-3 lines
+            self.problem.setToolTip(text)
+            self.problem.setStyleSheet(f"background:transparent; color:{fg}; font-weight:600; font-size:13px;")
+            self.problem.show()
+        else:
+            self.problem.hide()
+        self.refresh_twin()
+
+
 # ---------------------------------------------------------------------------------------------- preview
 class PreviewFeeder(QObject):
     """--preview: plays the demo states with fake data so the design can be seen. Sends nothing anywhere."""
@@ -1885,6 +2500,11 @@ def main():
     ap.add_argument('--invert', default=','.join(sorted(INVERT)),
                     help='cameras shown rotated by 180 degrees (RGB and depth), comma separated keys: zed,d405_1,d405_2 '
                          '(default: the two wrist cameras; "" = none)')
+    ap.add_argument('--second-display', choices=('twin', 'cameras'), default='twin',
+                    help='display 2: the 3D digital twin (default, needs launch/digital_twin.launch.py) or the old '
+                         'camera page with the ROBO STATUS list')
+    ap.add_argument('--no-embed', action='store_true',
+                    help='twin display: do not embed the RViz window (RViz stays its own window)')
     ap.add_argument('--force-two', action='store_true', help=argparse.SUPPRESS)      # test: two windows, one screen
     ap.add_argument('--screenshot', metavar='DIR', help=argparse.SUPPRESS)       # offscreen design check
     a = ap.parse_args(rclpy.utilities.remove_ros_args(sys.argv)[1:])
@@ -1911,7 +2531,9 @@ def main():
     two = (not a.single and len(screens) >= 2) or a.force_two
     # display 1 (--control-screen): Home / Operator, switches to the cameras on START; display 2: cameras, always
     windows = [MainWindow(model, ros, hub, decoder, a.preview, 'main')]
-    if two:
+    if two and a.second_display == 'twin':      # display 2 = 3D digital twin (display 1 keeps cameras, status, Operator)
+        windows.append(TwinWindow(model, ros, hub, TwinLink(ros, preview=bool(feeder)), a.preview, not a.no_embed))
+    elif two:
         windows.append(MainWindow(model, ros, hub, decoder, a.preview, 'camera'))
     if feeder:
         feeder.attach(ros)

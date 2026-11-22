@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FR3 Duo - Photoreal Twin</title>
+<style>
+  :root { --bg:#0f1b22; --panel:#16262f; --line:#24404d; --text:#e6eef2; --dim:#8fa6b2; --ok:#3fd39a; --warn:#f2b84b;
+          --bad:#ff5a5f; --accent:#7fd4ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.4 "Montserrat","Lato","DejaVu Sans",sans-serif;
+         height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; align-items:center; gap:18px; padding:10px 18px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:18px; font-weight:600; margin:0; letter-spacing:.3px; }
+  header .sub { color:var(--dim); font-size:12px; letter-spacing:1px; text-transform:uppercase; }
+  .pill { margin-left:auto; padding:4px 12px; border-radius:20px; font-weight:600; font-size:13px; background:#22343d; }
+  .pill.ok { background:rgba(63,211,154,.15); color:var(--ok); } .pill.warn { background:rgba(242,184,75,.15); color:var(--warn); }
+  .pill.bad { background:rgba(255,90,95,.18); color:var(--bad); }
+  main { flex:1; display:flex; min-height:0; }
+  #stage { flex:1; position:relative; background:#0a1318; min-width:0; }
+  #view { width:100%; height:100%; object-fit:contain; display:block; cursor:grab; user-select:none; -webkit-user-drag:none; }
+  #view.drag { cursor:grabbing; }
+  #nostream { position:absolute; inset:0; display:none; align-items:center; justify-content:center; color:var(--dim);
+              text-align:center; padding:40px; }
+  .views { position:absolute; left:14px; bottom:14px; display:flex; gap:6px; }
+  .views button { background:rgba(15,27,34,.75); border:1px solid var(--line); color:var(--text); padding:6px 10px;
+                  border-radius:6px; cursor:pointer; font-size:12px; }
+  .hud { position:absolute; right:14px; top:14px; color:var(--dim); font-size:12px; background:rgba(15,27,34,.7);
+         padding:6px 10px; border-radius:6px; }
+  aside { width:380px; background:var(--panel); border-left:1px solid var(--line); padding:16px; overflow-y:auto;
+          display:flex; flex-direction:column; gap:14px; }
+  .card { border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .card h2 { margin:0 0 8px; font-size:12px; color:var(--dim); letter-spacing:1px; text-transform:uppercase; font-weight:600; }
+  .row { display:flex; justify-content:space-between; gap:10px; font-size:14px; padding:2px 0; }
+  .row span:last-child { text-align:right; color:var(--dim); }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; background:var(--dim); }
+  .dot.ok { background:var(--ok); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); }
+  button.act { width:100%; padding:12px; border-radius:8px; border:1px solid var(--line); background:#1e3a47;
+               color:var(--text); font-size:15px; font-weight:600; cursor:pointer; }
+  button.act:hover { background:#24485a; } button.act:disabled { opacity:.45; cursor:not-allowed; }
+  button.primary { background:#1f6f8b; border-color:#2a89ab; }
+  button.stop { background:#b3262c; border-color:#e23a41; font-size:18px; letter-spacing:1px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .grid2 button { padding:8px; font-size:13px; }
+  #scantext { font-size:13px; color:var(--text); min-height:20px; }
+  .bar { height:6px; background:#22343d; border-radius:3px; overflow:hidden; margin-top:6px; }
+  .bar div { height:100%; width:0; background:var(--accent); transition:width .4s; }
+  #msg { font-size:13px; color:var(--warn); min-height:18px; }
+  .note { font-size:12px; color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <div><h1>FR3 Duo &mdash; Photoreal Digital Twin</h1><div class="sub">Live &middot; measured joint positions &middot; RTX path tracing</div></div>
+  <div id="state" class="pill">connecting&hellip;</div>
+</header>
+<main>
+  <div id="stage">
+    <img id="view" alt="photoreal twin" draggable="false">
+    <div id="nostream">Photoreal renderer not running.<br>Start it with <code>scripts/start_isaac_twin.sh</code></div>
+    <div class="views">
+      <button data-v="hero">Overview</button><button data-v="front">Front</button><button data-v="top">Top</button>
+      <button data-v="left">Left</button><button data-v="right">Right</button><button data-v="headcam">Head camera</button>
+    </div>
+    <div class="hud" id="hud">&ndash;</div>
+  </div>
+  <aside>
+    <div class="card"><h2>Robots</h2><div id="arms"></div></div>
+    <div class="card">
+      <h2>Scan the surroundings</h2>
+      <div class="note">Both arms rise from HOME and look around with their wrist cameras (about 1 minute of motion),
+        then return home. Afterwards the wrist cameras are calibrated against the head camera and their close-range
+        data is fused into the 3D scene.</div>
+      <div style="height:8px"></div>
+      <div class="note" style="margin-top:6px"><b>For sharp, realistic objects</b> the wrist cameras need their
+        mounts measured once: print the <a href="/board.pdf" target="_blank" style="color:var(--accent)">calibration
+        board (A4, 100 %)</a>, lay it flat about 60 cm in front of the robot, centred between the grippers, then scan.
+        After that every scan fuses the close-range wrist data. Remove the board afterwards and scan again.</div>
+      <div style="height:8px"></div>
+      <button class="act primary" id="scan">Scan surroundings</button>
+      <div style="height:8px"></div>
+      <div id="scantext">&ndash;</div>
+      <div class="bar"><div id="scanbar"></div></div>
+    </div>
+    <div class="card"><h2>3D scene</h2><div id="scene"></div></div>
+    <div class="card"><h2>Motion</h2>
+      <div class="grid2">
+        <button class="act" id="home">Home</button><button class="act" id="reset">Reset 3D map</button>
+        <button class="act" data-c="gripper_left_open">L gripper open</button><button class="act" data-c="gripper_left_close">L gripper close</button>
+        <button class="act" data-c="gripper_right_open">R gripper open</button><button class="act" data-c="gripper_right_close">R gripper close</button>
+      </div>
+      <div style="height:10px"></div>
+      <button class="act stop" id="stop">STOP</button>
+      <div class="note" style="margin-top:6px">The E-stop stays the safety device. STOP = same as pedal 2.</div>
+    </div>
+    <div id="msg"></div>
+  </aside>
+</main>
+<script>
+const STREAM = `http://${location.hostname}:8212`;
+const view = document.getElementById('view');
+view.src = STREAM + '/stream.mjpg';
+view.onerror = () => { document.getElementById('nostream').style.display = 'flex'; setTimeout(() => { view.src = STREAM + '/stream.mjpg?' + Date.now(); }, 3000); };
+view.onload = () => { document.getElementById('nostream').style.display = 'none'; };
+
+function post(url, body) { return fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); }
+async function cmd(c, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  const m = document.getElementById('msg'); m.textContent = c + ' ...';
+  try { const r = await (await post('/api/cmd', {cmd:c})).json(); m.textContent = (r.ok ? '' : 'Refused: ') + r.message; }
+  catch (e) { m.textContent = 'UI backend not reachable'; }
+}
+document.getElementById('scan').onclick = () => cmd('scan', 'The robot arms will MOVE (about 1 minute). Workspace clear and E-stop at hand?');
+document.getElementById('home').onclick = () => cmd('home', 'Both arms move to HOME. Workspace clear and E-stop at hand?');
+document.getElementById('stop').onclick = () => cmd('stop');
+document.getElementById('reset').onclick = () => cmd('recon_reset', 'Forget the 3D map and rebuild it from the cameras?');
+document.querySelectorAll('[data-c]').forEach(b => b.onclick = () => cmd(b.dataset.c, b.dataset.c.endsWith('close') ? 'Close the gripper?' : null));
+document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => post(STREAM + '/view', {preset:b.dataset.v}));
+
+// orbit (left drag), pan (right / shift drag), zoom (wheel)
+let drag = null, acc = {daz:0, del:0, pan:[0,0]};
+view.addEventListener('contextmenu', e => e.preventDefault());
+view.addEventListener('mousedown', e => { drag = {x:e.clientX, y:e.clientY, pan: e.button === 2 || e.shiftKey}; view.classList.add('drag'); });
+window.addEventListener('mouseup', () => { drag = null; view.classList.remove('drag'); });
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.pan) { acc.pan[0] -= dx * 0.002; acc.pan[1] += dy * 0.002; } else { acc.daz -= dx * 0.3; acc.del += dy * 0.3; }
+});
+view.addEventListener('wheel', e => { e.preventDefault(); post(STREAM + '/view', {zoom: e.deltaY > 0 ? 1.1 : 1/1.1}); }, {passive:false});
+setInterval(() => {
+  if (acc.daz || acc.del || acc.pan[0] || acc.pan[1]) { post(STREAM + '/view', acc); acc = {daz:0, del:0, pan:[0,0]}; }
+}, 50);
+
+const STATE = {IDLE:'ok', TELEOP:'ok', HOMING:'warn', TELEOP_STARTING:'warn', STARTING_UP:'warn', ERROR:'bad', OFFLINE:'bad'};
+function row(dot, l, r) { return `<div class="row"><span><span class="dot ${dot}"></span>${l}</span><span>${r}</span></div>`; }
+async function poll() {
+  let s; try { s = await (await fetch('/api/status')).json(); } catch (e) { document.getElementById('state').textContent = 'UI backend offline'; return; }
+  const d = s.demo || {}, st = d.state || 'OFFLINE';
+  const pill = document.getElementById('state'); pill.className = 'pill ' + (STATE[st] || 'warn');
+  pill.textContent = st.replace('_', ' ') + (d.message ? ' — ' + d.message : '');
+  let arms = '';
+  for (const [arm, a] of Object.entries(d.arms || {})) {
+    const err = (a.errors || []).length; arms += row(err ? 'bad' : (a.robot_mode === 'IDLE' || a.robot_mode === 'MOVE' ? 'ok' : 'warn'),
+      arm.toUpperCase(), `${a.robot_mode || '-'}${err ? ' · ' + a.errors.join(', ') : ''} · gripper ${a.gripper || '-'}`);
+  }
+  document.getElementById('arms').innerHTML = arms || '<span class="note">no supervisor status</span>';
+  const sc = s.scan || {}, m = (d.message || '').match(/SCAN view (\d+)\/(\d+)/);
+  document.getElementById('scantext').textContent = m ? `moving: view ${m[1]} of ${m[2]}` : (sc.text || 'no scan yet');
+  document.getElementById('scanbar').style.width = m ? (100 * m[1] / m[2]) + '%' : (sc.busy ? '100%' : '0%');
+  document.getElementById('scan').disabled = !(st === 'IDLE');
+  const r = s.recon || {}, cams = r.cameras || {}, cs = k => (cams[k] || {}).state || '-';
+  const dot = t => t.startsWith('ok') ? 'ok' : (t.startsWith('skipped') ? 'warn' : 'bad');
+  document.getElementById('scene').innerHTML =
+    row('ok', 'Surfaces', `${((r.triangles || 0) / 1000).toFixed(0)}k triangles · ${((r.voxel_m || 0) * 1000).toFixed(0)} mm`) +
+    row(dot(cs('zed')), 'Head camera', cs('zed')) +
+    row(dot(cs('d405_1')), 'Left wrist camera', cs('d405_1').replace('skipped: ', '')) +
+    row(dot(cs('d405_2')), 'Right wrist camera', cs('d405_2').replace('skipped: ', '')) +
+    row(r.live_voxels ? 'warn' : 'ok', 'Moving objects', `${r.live_voxels || 0} voxels`);
+  const k = s.stream;
+  document.getElementById('hud').textContent = k ? `${k.fps} fps · joint data ${k.joint_age_ms ?? '-'} ms old at render` : 'renderer offline';
+}
+setInterval(poll, 500); poll();
+</script>
+</body>
+</html>

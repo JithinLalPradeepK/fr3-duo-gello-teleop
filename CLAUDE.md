@@ -410,3 +410,103 @@ same supervisor services. Until then pedal 3 can be a GNOME shortcut to ~/fr3_to
   removal. Sim before the merge: gate 186/186 + 15/15, supervisor 124/124, GUI e2e 35/35, geometry/pedal/depth/gui-camera unit tests.
   Work from now on: new branch from main + PR (main is protected).
 
+## DIGITAL TWIN (2026-11-21, branch feature/digital-twin in ~/robot_demo_gautham, NOT committed / pushed; user request)
+- Display 2 = 3D digital twin (demo_gui.TwinWindow embeds the RViz2 window of launch/digital_twin.launch.py, X11, only its 3D
+  panel visible); display 1 unchanged (cameras, status, Operator). start_demo.sh starts the twin before the GUI (DEMO_TWIN=0 =
+  old camera page on display 2). Read-only: no control/safety/supervisor/gate/pedal code changed. Details docs/DIGITAL_TWIN.md.
+- Data: /<arm>/franka/joint_states (measured) -> C++ throttle 100 Hz -> /twin/joint_states -> twin robot_state_publisher
+  (frame prefix twin/); overlays from /<arm>/robot_state_10hz; clearance = duo_geometry capsules. Clouds lazy (layer on only).
+- CHANGED existing files: demo_gui.py (+TwinLink/RvizHost/TwinWindow, --second-display, --no-embed), start_demo.sh,
+  launch/cameras.launch.py (ZED publish_tf:=false + config/zed_twin_override.yaml: point cloud COMPACT).
+- Gotchas learned: RViz2 Humble TEXT markers draw spaces far too wide (no spaces in 3D labels); RViz adds "*" to its title
+  once modified; embedding a WM-managed window needs unmap (withdraw) first + Qt container made native (winId()) before
+  show, else it lands in the top-level / stays managed; on GUI exit the RViz window must be handed back (X destroys
+  foreign children); root-window grabs of full-screen windows are black (grab the window id).
+- Sim: test/sim_twin_test.sh 27/27, test/sim_twin_gui_test.sh 8/8 (x3), sim_gui_test 35/35, gui_camera_test PASS.
+- HARDWARE OPEN: real rates/latency, gripper mount + knuckle direction, force arrow frame, ZED cloud cost, publish_tf:=false
+  on the real ZED, camera extrinsics (all `calibrated: false`; use scripts/twin_calibrate.py), ZED spatial mapping.
+- HARDWARE 2026-11-21 21:21-21:30 (this copy's start_demo.sh; you teleoperated 184 s): twin LIVE 95 Hz/arm, latency 0.6 ms
+  median (3.5 ms max) from the real /<arm>/franka/joint_states (1 kHz; joint ORDER IS SCRAMBLED in the real messages ->
+  always map by name; fake robots now reproduce it). test/twin_track_check.py twin vs GELLO while LIVE: j1-j4 scale
+  0.96-1.00, corr >= 0.99, median 4-15 mrad, lag 110-180 ms; wrist j5-j7 scale 0.91-0.96, lag 190-500 ms, p95 up to
+  0.86 rad on fast twists = the ROBOT lagging the GELLO (gate LiveSmoother: min(2.0 rad/s, 0.5 x FR3 limit), 25 Hz
+  GELLO), not the twin. Raising the cap = user decision (reflex history). Monitors: 1 = camera page, 2 = twin, both OK.
+- ZED is the HEAD cam (on the robot, looking forward/down), not in front: placeholder extrinsics wrong. First
+  scripts/twin_autocalib.py run gave a FALSE fit (1565 matches, camera 1.4 m up) - not written; acceptance must be
+  stricter (gripper points must match). ZED cloud COMPACT = 84k points at 7 Hz (REDUCED was 224x128).
+
+## PROGRESS SAVED 2026-11-21 22:15 (branch feature/digital-twin, NOTHING committed - user: no commits to GitHub)
+Demo of this copy (scripts/start_demo.sh, started 21:21) is still OPEN but OFFLINE (arm stack shut down, robots hold).
+Hardware facts learned today: real /<arm>/franka/joint_states have SCRAMBLED joint order (map by name); ZED = head cam
+on the robot; D405 GUI 180-deg flip is CORRECT (raw: near table at top); d405_1 = LEFT arm (verified by closing the left
+gripper). GELLO -> twin tracking measured (see above): lag = controller damping D/K + 1 GELLO period, not the twin.
+DONE (sim-tested, NOT yet on hardware):
+- Gate LEAD compensation (scripts/gello_gate.py LiveSmoother, --live-lead-scale 1.0, per-joint torque-budget cap LEAD_CAP)
+  + speed caps raised (--live-max-vel 3.5, --live-vel-frac 0.75; were 2.0 / 0.5). test/live_lead_test.py 9/9 (model lag
+  128 -> 4 ms j1-j4, wrist halved), gate suite 186/186 + 15/15. NEXT: hardware teleop with test/twin_track_check.py +
+  scripts/test_recorder.py (watch reflex rate). --live-lead-scale 0 = old behaviour.
+- GELLO ghost in the twin (translucent, layer "GELLO ghost", shown only while TELEOP_STARTING/TELEOP): sim twin 32/32.
+- 3D SCAN: scripts/scan_plan.py (views above home, wrists apart, all moves checked), supervisor /demo/scan (+ Operator
+  button "3D SCAN", demo_cmd.sh scan) run as HOME phases "SCAN view i/n"; scripts/twin_scan.py records the D405s during the
+  scan, solves the D405 hand-eye (position + colour consistency, coarse search + Nelder-Mead) and fuses a 4 mm colour model
+  -> scans/latest.npz -> layer "3D scan"; also refits the ZED. test/twin_scan_test.py 6/6 (synthetic: mounts 0.8 / 1.8 mm,
+  model median 1.4 mm; ~4 min fusion).
+- scripts/twin_autocalib.py (ZED vs robot model ICP) - first real run gave a FALSE fit (not written); superseded by the
+  scan-based ZED fit. Its acceptance must stay strict.
+OPEN / NEXT (in this order):
+1. test/sim_scan_test.sh: 5/9 - HOME in that sim FAULTS ("home ended: left: fault"); the supervisor's gate logs for that
+   run were not found yet (look for logs/demo_<time> of 22:04, or run the sim supervisor by hand). The C2 check must
+   require "both arms at home". Fix, then the scan sim must pass before any hardware scan.
+2. Run the existing suites again after the supervisor change: test/sim_supervisor_test.sh (needs the demo CLOSED),
+   test/sim_gui_test.sh, test/sim_twin_test.sh, test/twin_scan_test.py.
+3. Hardware (user present, E-stop): BRING UP -> teleop with the lead (track check) -> HOME -> 3D SCAN -> check fused
+   model + written extrinsics in config/digital_twin.yaml -> twin look (monitor 2).
+4. Docs: docs/DIGITAL_TWIN.md for lead / ghost / scan; show the full diff to the user.
+
+## SOLID 3D RECONSTRUCTION (2026-11-22, branch feature/digital-twin, NOT committed; user request; details docs/DIGITAL_TWIN.md)
+- scripts/twin_recon_core.py (numpy TSDF + surface nets + robot capsule filter + live objects + Marker bytes) and
+  scripts/twin_recon.py (node, nice +10, 1 BLAS thread, worker thread drops stale frames). Known camera poses from twin TF
+  (no SLAM). ZED Spatial Mapping / nvblox / Open3D evaluated and NOT used (SLAM, cloud only / big CUDA stack / not installed).
+  No dependency installed. Launch: part of digital_twin.launch.py (recon:=false to disable), C++ throttles feed depth.
+- Config: digital_twin.yaml `reconstruction:` (voxel 1 cm, bounds, cameras, live, shading); layers mesh + live_objects ON,
+  zed_cloud + scan raw overlays now OFF by default (sim_twin_test W9 switches zed_cloud on itself).
+- Services /twin/recon/{save,load,reset} (Trigger), /twin/recon/mapping (SetBool). Map: scans/recon_map.npz (+ .ply).
+- D405 integration requires cameras.<d405>.calibrated: true (3D SCAN) and arm speed < 0.4 rad/s.
+- Tests: test/twin_recon_test.py 13/13, test/sim_recon_test.sh 9/9, sim_twin_test 32/32, gui_camera_test PASS.
+  sim_gui_test.sh / sim_twin_gui_test.sh NOT run (a live teleop stack from ~/robot_demo_standby was running on the robots).
+- Real ZED frame_id is zed_left_camera_frame_optical (1920x1080 32FC1, colour stamp identical).
+- Known: twin_state.py still prints a traceback on Ctrl-C (rclpy default SIGINT handler); twin_recon handles signals itself.
+
+## SESSION 2026-11-22 (verified on hardware; user present at the E-stop for every motion)
+- SAFETY FINDING + FIX: ROS 2 DDS was multicasting camera data onto enp97s0 (ROBOT/FCI network): 110 MB/s out, caused a
+  communication_constraints_violation reflex at the start of HOME. env/host_env.sh now: ROS_LOCALHOST_ONLY=1 +
+  config/cyclonedds_host.xml (no <Interfaces> element: conflicts with LOCALHOST_ONLY in Cyclone 0.10.5). Robot link now
+  9 kB/s, RT-lock errors 0. ~/robot_demo/env/host_env.sh does NOT have this yet - port it there (user decision / PR).
+- demo_supervisor.py: cameras now launched from ITS OWN copy (CAMERAS_LAUNCH); gates / arm launches still ~/robot_demo.
+  Supervisor + gate logs are written to ~/robot_demo/logs/demo_* (DEMO path), not this copy's logs/.
+- ZED calibrated + verified (see docs/DIGITAL_TWIN.md "Calibration state"). D405 mounts NOT calibrated (estimate only).
+- HOME + 3D SCAN ran on the robots (9 views, 60 s, no fault). test/sim_scan_test.sh cannot pass by design: the mock
+  hardware never moves under the effort-commanding impedance controller (HOME error stays constant) - needs a fake
+  that integrates motion; scan trajectory verified offline instead (>= 20 cm from all mapped objects, tips never below home).
+- Photoreal twin: Isaac Sim 6.2 in ~/isaacsim_env, scripts/start_isaac_twin.sh (docs). RT latency unaffected (62 us max).
+- Reconstruction tests now: twin_recon_test 13/13, sim_recon_test 10/10, sim_twin_test 32/32 (W7 reads the config),
+  twin_scan_test 6/6, twin_autocalib_test 5/5. Clean map saved: scans/recon_map.npz/.ply (autoload).
+- Demo left running: IDLE, both arms at home, controllers inactive; twin_recon running standalone (newer code than the
+  one the demo's twin launch started); Isaac twin on display 2.
+
+## BROWSER PHOTOREAL UI (2026-11-22, hardware-verified; see docs/DIGITAL_TWIN.md "Photoreal twin in the BROWSER")
+- scripts/start_isaac_twin.sh -> http://127.0.0.1:8211/ (bridge: UI + commands via supervisor services) + :8212 stream
+  (Isaac headless MJPEG). GUI Operator button "PHOTOREAL TWIN". Accuracy measured: 0.2 mm median / 2.1 mm max flange error
+  while moving (velocity extrapolation to render time). Scans started from the browser ran twice without fault.
+- Wrist D405 mounts still NOT calibrated: needs the printed ChArUco board (docs/charuco_board_A4.pdf) -> one SCAN.
+- twin_recon: 6 mm voxels (worker ~160-225 ms/frame), export_npz for Isaac, /twin/recon/cmd (save / integrate),
+  live hold_s 1.5. twin_scan: ZED photo per view, full-res wrist colour, board-first calibration.
+- Tests: twin_recon_test 13/13, sim_recon_test 10/10, twin_board_test 8/8, twin_scan_test 6/6.
+- Running now (standalone, newer than the demo's twin launch): twin_recon, twin_scan record, start_isaac_twin.sh.
+
+## EXHIBITION BRANCH digital-twin-version (2026-11-22, pushed to GitHub at the user's request)
+- = feature/digital-twin work (twin, photoreal browser UI, reconstruction, SCAN, DDS localhost fix) in one commit.
+- USER DECISION: gate LIVE defaults back to the HARDWARE-TESTED values (--live-lead-scale 0, --live-max-vel 2.0,
+  --live-vel-frac 0.5). Lead compensation stays in the code; enable with --live-lead-scale 1.0 --live-max-vel 3.5
+  --live-vel-frac 0.75 only after a hardware test. Supervisor paths unchanged (gate/arms/logs from ~/robot_demo).
+- Sim before the push: gate 186/186 + 15/15, live_lead 9/9, supervisor 124/124, GUI e2e 35/35, twin 32/32.

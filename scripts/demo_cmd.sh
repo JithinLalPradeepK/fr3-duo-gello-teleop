@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Command-line client for demo_supervisor (same services the GUI and pedals use).
-#   demo_cmd.sh start|stop|home|recover|bringup|shutdown
+#   demo_cmd.sh start|stop|home|recover|bringup|shutdown|scan
 #   demo_cmd.sh gripper left|right open|close
 #   demo_cmd.sh status            # one status snapshot, pretty-printed
 #   demo_cmd.sh watch             # status every second (Ctrl-C to quit)
@@ -23,7 +23,7 @@ print('  cameras', s['cameras'], s.get('cameras_launch', ''), ' pedal:', s['peda
 "
 }
 case "${1:-}" in
-  start|stop|home|recover|bringup|shutdown) call "$1";;
+  start|stop|home|recover|bringup|shutdown|scan) call "$1";;
   gripper) call "gripper/${2:?left|right}/${3:?open|close}";;
   status) status;;
   watch) while true; do clear; date +%T; status; sleep 1; done;;

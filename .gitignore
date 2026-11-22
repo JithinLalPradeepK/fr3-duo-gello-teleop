@@ -22,3 +22,12 @@ assets/brand/*.jpg
 
 # local tool state (Claude Code worktrees etc.)
 .claude/
+
+# Isaac Sim photoreal twin: generated URDF / mesh cache
+isaac/cache/
+
+# 3D scans / reconstruction maps (large, machine-specific)
+scans/
+
+# Gaussian splat datasets / models (large)
+splats/

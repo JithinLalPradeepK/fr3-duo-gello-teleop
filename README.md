@@ -42,7 +42,7 @@ Details: [docs/supervisor_design.md](docs/supervisor_design.md).
 |---|---|
 | `scripts/start_demo.sh` | Starts the whole demo: desk_agent, supervisor, pedal, GUI. Closing the GUI shuts everything down. |
 | `scripts/demo_supervisor.py` | Supervisor node (state machine, services, `/demo/status` JSON). |
-| `scripts/demo_gui.py`, `scripts/franka_theme.py` | PyQt5 GUI (CONTROL + CAMERAS windows) and styling. |
+| `scripts/demo_gui.py`, `scripts/franka_theme.py` | PyQt5 GUI (display 1: cameras, status, Operator; display 2: digital twin) and styling. |
 | `scripts/demo_pedal.py` | Foot pedal node (evdev). |
 | `scripts/desk_agent.py`, `scripts/franka_desk.py` | Franka Desk API client (brakes, Programming/Execution mode, FCI). |
 | `scripts/gello_gate.py` | Start gate: safe hand-over from GELLO to the robot (one per arm). |
@@ -52,6 +52,7 @@ Details: [docs/supervisor_design.md](docs/supervisor_design.md).
 | `scripts/test_recorder.py` | Read-only event recorder for test sessions. |
 | `launch/` | `arms_gated`, `gello_check`, `cameras` launch files. |
 | `scripts/depth_view.py` | Depth camera -> colourised JPEG for the GUI (near red, far blue); one per camera, started by `cameras.launch.py`, lazy. |
+| `launch/digital_twin.launch.py`, `scripts/twin_state.py`, `scripts/twin_cloud.py`, `description/` | **Digital twin** on display 2 (RViz2 3D view of both FR3s from the measured joint states, overlays, point clouds; read-only). See [docs/DIGITAL_TWIN.md](docs/DIGITAL_TWIN.md). |
 | `config/` | GELLO publisher config (isolated namespaces), holder poses, fake-hardware robot config. |
 | `env/host_env.sh` | Sources all workspaces in the right order. |
 | `test/` | Simulation tests (fake hardware, separate ROS domain). |

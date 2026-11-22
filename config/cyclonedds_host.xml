@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- REAL DEMO DDS config (env/host_env.sh). ROS 2 traffic stays on loopback: everything runs on this workstation.
+     Without it Cyclone binds to enp97s0 (the ROBOT network) and multicasts camera data there: measured 2026-11-22
+     110 MB/s outgoing on the FCI link -> left FR3 "communication_constraints_violation" reflex at the start of HOME.
+     The interface comes from ROS_LOCALHOST_ONLY=1 (env/host_env.sh; an explicit <Interfaces> here conflicts with it in
+     Humble's Cyclone 0.10.5 -> "failed to create domain"). lo has no multicast -> unicast discovery, so: enough
+     participant indices for the full demo. -->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain Id="any">
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>200</MaxAutoParticipantIndex>
+      <Peers><Peer address="localhost"/></Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

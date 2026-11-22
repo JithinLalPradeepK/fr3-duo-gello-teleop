@@ -147,11 +147,30 @@ def fmt(q):
     return '[' + ', '.join(f'{x:+.3f}' for x in q) + ']'
 
 
+# Stock joint impedance controller (franka_fr3_arm_controllers config/controllers.yaml): tau = K (q_goal - q) - D dq, no
+# velocity feed-forward -> at a constant joint speed v the robot trails its goal by D/K seconds (j1-3 83 ms ... j7 250 ms;
+# measured 2026-11-21 with GELLO teleop: 110-500 ms total lag). LEAD compensation (2026-11-21, user request "no lag"):
+# command q_gello + lead_scale * (D/K + sample period) * v_gello -> at constant speed the damping term is cancelled.
+CTRL_K = (240.0, 240.0, 240.0, 240.0, 100.0, 60.0, 20.0)
+CTRL_D = (20.0, 20.0, 20.0, 10.0, 10.0, 10.0, 5.0)
+LEAD_S = tuple(d / k for k, d in zip(CTRL_K, CTRL_D))
+# per-joint cap of the lead offset from a TORQUE budget: K * offset <= 36 Nm on j1-j4 (limit 87 Nm), 9 Nm on the wrist
+# (limit 12 Nm) -> j1-j4 0.15, j5 0.09, j6 0.15, j7 0.3 rad (also never more than lead_max)
+LEAD_CAP = tuple(min(0.3, t / k) for k, t in zip(CTRL_K, (36.0, 36.0, 36.0, 36.0, 9.0, 9.0, 9.0)))
+
+
 class LiveSmoother:
     """LIVE command shaping: linear segment from the current output to each new GELLO sample, lasting the
-    expected sample interval (EMA of measured intervals), sampled at the publish rate and rate-limited."""
+    expected sample interval (EMA of measured intervals), sampled at the publish rate and rate-limited.
+    lead_scale > 0: each sample's goal is pushed ahead by lead_scale * (D/K + period) * (filtered GELLO velocity),
+    at most min(lead_max, LEAD_CAP[j]) rad; the lead fades to zero when the GELLO stops or its samples stall; never during
+    catch-up. The speed / joint-limit clamps act AFTER the lead (the lead can never exceed them)."""
 
-    def __init__(self, q0, max_vel, now, period=0.04, vel_frac=0.5, margin=0.1, soft_min=None):
+    def __init__(self, q0, max_vel, now, period=0.04, vel_frac=0.5, margin=0.1, soft_min=None,
+                 lead_scale=0.0, lead_max=0.3):
+        self.lead_scale, self.lead_max = lead_scale, lead_max
+        self.v = [0.0] * len(q0)        # filtered GELLO joint velocity [rad/s]
+        self.raw = list(q0)             # last GELLO sample (without lead)
         self.vel_frac = vel_frac        # share of the FR3 position-dependent speed limit the command may use
         self.lo = [x + margin for x in Q_MIN]
         self.hi = [x - margin for x in Q_MAX]
@@ -172,12 +191,30 @@ class LiveSmoother:
             dt = now - self.t_sample
             if 0.005 < dt < 0.2:
                 self.period = min(0.1, max(0.005, 0.8 * self.period + 0.2 * dt))
+                self.v = [0.5 * v + 0.5 * (a - b) / dt for v, a, b in zip(self.v, q, self.raw)]
+            else:
+                self.v = [0.0] * len(q)
         self.t_sample = now
-        self.start, self.goal, self.t_seg = list(self.y), list(q), now
+        self.raw = list(q)
+        self.start, self.goal, self.t_seg = list(self.y), self.lead_goal(q), now
+
+    def lead_goal(self, q):
+        if self.lead_scale <= 0 or self.catching:
+            return list(q)
+        out = []
+        for j, (x, v) in enumerate(zip(q, self.v)):
+            cap = min(self.lead_max, LEAD_CAP[j])
+            out.append(x + max(-cap, min(cap, self.lead_scale * (LEAD_S[j] + self.period) * v)))
+        return out
 
     def step(self, now):
         dt = min(0.05, max(0.0, now - self.t_out))
         self.t_out = now
+        if self.t_sample is not None and now - self.t_sample > 2.5 * self.period and any(self.v):
+            # GELLO samples stalled (or the operator stopped and no new sample came): drop the lead, go to the
+            # last real GELLO pose (rate-limited like everything else)
+            self.v = [0.0] * len(self.v)
+            self.start, self.goal, self.t_seg = list(self.y), list(self.raw), now
         a = min(1.0, (now - self.t_seg) / self.period)
         out = []
         for j, (y, s, g) in enumerate(zip(self.y, self.start, self.goal)):
@@ -718,7 +755,8 @@ class GelloGate(Node):
         if self.a.live_hz > 0:
             self.smoother = LiveSmoother(snapshot, self.a.live_max_vel, time.monotonic(),
                                          vel_frac=self.a.live_vel_frac, margin=self.a.limit_margin,
-                                         soft_min={3: self.a.live_j4_min})
+                                         soft_min={3: self.a.live_j4_min},
+                                         lead_scale=self.a.live_lead_scale, lead_max=self.a.live_lead_max)
             self.next_live = time.monotonic()
             if catchup:                  # the GELLO moved on while the robot ramped: follow it, slowly at first
                 self.smoother.catching, self.smoother.catch_vel = True, self.a.catchup_vel
@@ -819,8 +857,16 @@ def parse_args(argv):
     p.add_argument('--relay-hz', type=float, default=100.0)
     p.add_argument('--live-hz', type=float, default=200.0,
                    help='LIVE: publish rate of the smoothed GELLO command (0 = relay raw samples, old behaviour)')
+    # Exhibition defaults (2026-11-22, user decision): the HARDWARE-TESTED values. Lead compensation + raised caps
+    # (--live-lead-scale 1.0 --live-max-vel 3.5 --live-vel-frac 0.75) are sim-tested only: hardware test first.
     p.add_argument('--live-max-vel', type=float, default=2.0,
-                   help='LIVE: max commanded joint speed [rad/s] (FR3 limits: 2.62 j1-j4, 5.26 j5-j7)')
+                   help='LIVE: max commanded joint speed [rad/s] (FR3 limits: 2.62 j1-j4, 5.26 j5-j7). '
+                        'Lead-compensation candidate: 3.5 (not hardware-tested)')
+    p.add_argument('--live-lead-scale', type=float, default=0.0,
+                   help='LIVE: lag compensation, 1.0 = cancel the controller damping lag D/K + one GELLO period; '
+                        '0 = off (default, hardware-tested behaviour)')
+    p.add_argument('--live-lead-max', type=float, default=0.3,
+                   help='LIVE: max lead offset [rad]; per joint also capped by a torque budget (LEAD_CAP)')
     p.add_argument('--other-arm', choices=['left', 'right'], default=None,
                    help='enable the duo collision guard against this arm (the supervisor sets it for both gates)')
     p.add_argument('--guard-config', default=None, help='duo_guard.yaml (default: config/duo_guard.yaml)')
@@ -834,7 +880,8 @@ def parse_args(argv):
     p.add_argument('--catchup-vel', type=float, default=0.8,
                    help='catch-up speed cap [rad/s] until the command is within 0.03 rad of the GELLO')
     p.add_argument('--live-vel-frac', type=float, default=0.5,
-                   help='LIVE: command uses at most this share of the FR3 position-dependent speed limit')
+                   help='LIVE: command uses at most this share of the FR3 position-dependent speed limit '
+                        '(lead-compensation candidate: 0.75, not hardware-tested)')
     p.add_argument('--resync-time', type=float, default=2.0,
                    help='HOLD: GELLO held still this long off the snapshot -> ramp to the new pose (0 = off)')
     p.add_argument('--target-joints', type=lambda s: [float(x) for x in s.split(',')], default=None,

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FR3 Duo DIGITAL TWIN (visualisation only - no ros2_control, nothing here commands a robot).
+
+  Franka's own FR3 Duo mount + cover + two FR3 arms (franka_description) with a Robotiq 2F-85 on each flange
+  (robotiq_description). Joint names match the real robots' /<arm>/franka/joint_states
+  (left_fr3_joint1..7, right_fr3_joint1..7); the Robotiq knuckle joints are renamed by scripts/twin_state.py to
+  <arm>_robotiq_85_left_knuckle_joint.
+
+  The arm base poses are passed in by launch/digital_twin.launch.py from config/duo_geometry.yaml (Franka's mount
+  kinematics) using the namespace -> mount slot map in config/duo_guard.yaml (our namespaces are SWAPPED relative to
+  the mount description), so the twin and the HOME collision planner (scripts/duo_geometry.py) use the same geometry.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="fr3_duo_twin">
+  <xacro:include filename="$(find franka_description)/robots/common/franka_robot.xacro"/>
+  <xacro:include filename="$(find franka_description)/robots/fr3_duo/fr3_duo_mount/fr3_duo_mount.xacro"/>
+  <xacro:include filename="$(find franka_description)/robots/fr3_duo/fr3_duo_cover/fr3_duo_cover.xacro"/>
+  <xacro:include filename="$(find robotiq_description)/urdf/robotiq_2f_85_macro.urdf.xacro"/>
+
+  <xacro:arg name="left_base_xyz" default="0.03467 -0.050681 0.202"/>
+  <xacro:arg name="left_base_rpy" default="0.89334809 -0.17456074 0.46334506"/>
+  <xacro:arg name="right_base_xyz" default="0.03467 0.050681 0.202"/>
+  <xacro:arg name="right_base_rpy" default="-0.89334809 -0.17456074 -0.46334506"/>
+  <!-- Robotiq on the FR3 flange (link8). Estimate: coupling ~11 mm, rotated like the Franka Hand. -->
+  <xacro:arg name="gripper_xyz" default="0 0 0.011"/>
+  <xacro:arg name="gripper_rpy" default="0 0 -0.785398"/>
+  <xacro:arg name="grippers" default="true"/>
+
+  <xacro:property name="fr3" value="$(find franka_description)/robots/fr3"/>
+
+  <link name="world"/>
+  <xacro:mount name="mount" parent="world"
+               inertials="${xacro.load_yaml('$(find franka_description)/robots/fr3_duo/fr3_duo_mount/inertials.yaml')}">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:mount>
+  <xacro:cover name="cover" parent="mount_link"
+               inertials="${xacro.load_yaml('$(find franka_description)/robots/fr3_duo/fr3_duo_cover/inertials.yaml')}">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:cover>
+
+  <xacro:macro name="twin_arm" params="arm xyz rpy">
+    <!-- link ${arm}_base itself is created by franka_robot (connected_to) -->
+    <joint name="${arm}_base_joint" type="fixed">
+      <parent link="mount_link"/>
+      <child link="${arm}_base"/>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+    </joint>
+    <xacro:franka_robot arm_id="fr3"
+                        joint_limits="${xacro.load_yaml(fr3 + '/joint_limits.yaml')}"
+                        inertials="${xacro.load_yaml(fr3 + '/inertials.yaml')}"
+                        kinematics="${xacro.load_yaml(fr3 + '/kinematics.yaml')}"
+                        dynamics="${xacro.load_yaml(fr3 + '/dynamics.yaml')}"
+                        hand="false"
+                        ros2_control="false"
+                        arm_prefix="${arm}_"
+                        connected_to="${arm}_base"/>
+    <xacro:if value="$(arg grippers)">
+      <xacro:robotiq_gripper name="${arm}_robotiq" prefix="${arm}_" parent="${arm}_fr3_link8"
+                             include_ros2_control="false">
+        <origin xyz="$(arg gripper_xyz)" rpy="$(arg gripper_rpy)"/>
+      </xacro:robotiq_gripper>
+    </xacro:if>
+  </xacro:macro>
+
+  <xacro:twin_arm arm="left" xyz="$(arg left_base_xyz)" rpy="$(arg left_base_rpy)"/>
+  <xacro:twin_arm arm="right" xyz="$(arg right_base_xyz)" rpy="$(arg right_base_rpy)"/>
+</robot>
